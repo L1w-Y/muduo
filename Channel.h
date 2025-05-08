@@ -15,7 +15,7 @@ public:
     ~Channel();
     //fd 得到poller通知以后，处理事件
     void handleEvent(Timestamp receiveTime);
-
+    void remove();
     //设置回调
     void setReadCallback(ReadEventCallback cb){ readCallback_=std::move(cb); }
     void setReadCallback(EventCallback cb){ writeCallback_=std::move(cb); }
@@ -23,7 +23,7 @@ public:
     void setReadCallback(EventCallback cb){ errorCallback_=std::move(cb); }
 
     //  防止当channel被手动remove掉，channel还在执行回调
-    void tie(const std::shared_ptr<void>&);
+    void tie(const std::shared_ptr<void>&obj);
     //获取fd
     int fd(){return fd_;}
     //获取事件
@@ -55,14 +55,14 @@ private:
     static const int KReadEvent;
     static const int KWriteEvent;
 
-    EventLoop *loop_; //事件循环
+    EventLoop *loop_; //channel所属的事件循环
     const int fd_; //fd，poller监听的对象
     int events_; //注册fd感兴趣的事件
     int revents_; //poller返回的具体发生的事件
     int index_;  //
 
-    std::weak_ptr<void> tie_;
-    bool tied_;
+    std::weak_ptr<void> tie_{};
+    bool tied_{};
 
     ReadEventCallback readCallback_;
     EventCallback writeCallback_;
