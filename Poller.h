@@ -23,7 +23,8 @@ public:
 protected:
     //key：shckfd，value：sockfd所属的Channel类型
     using ChannelMap = std::unordered_map<int,Channel*>;
-    ChannelMap channels_;
+    //存储所有正在被 Poller 监听的 Channel
+    ChannelMap listening_channels_;
 private:
     EventLoop *ownerLoop_;
 };

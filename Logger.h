@@ -14,45 +14,42 @@ enum LogLevel{
     DEBUG,
 };
 
-#define LOG_INFO(logmsgFormat, ...)\
-do \
-{\
-    logger &Logger = Logger::instance();\
-    logger.setLogLevel(INFO);\
-    char bu[1024]={};\
-    snprintf(buf,1024,logmsgFormat,##__VA_ARGS__);\
-    logger.log(buf);\
+#define LOG_INFO(logmsgFormat, ...) \
+    do{ \
+        Logger &logger = Logger::instance(); \
+        logger.setLogLevel(INFO); \
+        char buf[1024]={}; \
+        snprintf(buf,1024,logmsgFormat,##__VA_ARGS__); \
+        logger.Log(buf); \
+    }while(0)
+
+#define LOG_ERROR(logmsgFormat, ...) \
+do{ \
+    Logger &logger = Logger::instance(); \
+    logger.setLogLevel(ERROR); \
+    char buf[1024]={}; \
+    snprintf(buf,1024,logmsgFormat,##__VA_ARGS__); \
+    logger.Log(buf); \
 }while(0)
 
-#define LOG_ERROR(logmsgFormat, ...)\
-do \
-{\
-    logger &Logger = Logger::instance();\
-    logger.setLogLevel(ERROR);\
-    char bu[1024]={};\
-    snprintf(buf,1024,logmsgFormat,##__VA_ARGS__);\
-    logger.log(buf);\
-}while(0)
-
-#define LOG_FATAL(logmsgFormat, ...)\
-do \
-{\
-    logger &Logger = Logger::instance();\
-    logger.setLogLevel(FATAL);\
-    char bu[1024]={};\
-    snprintf(buf,1024,logmsgFormat,##__VA_ARGS__);\
-    logger.log(buf);\
+#define LOG_FATAL(logmsgFormat, ...) \
+do{ \
+    Logger &logger = Logger::instance(); \
+    logger.setLogLevel(FATAL); \
+    char buf[1024]={}; \
+    snprintf(buf,1024,logmsgFormat,##__VA_ARGS__); \
+    logger.Log(buf); \
+    exit(-1); \
 }while(0)
 
 #ifdef MUDEBUG
 #define LOG_DEBUG(logmsgFormat, ...)\
-do \
-{\
-    logger &Logger = Logger::instance();\
+do {\
+    Logger &logger = Logger::instance();\
     logger.setLogLevel(DEBUG);\
-    char bu[1024]={};\
+    char buf[1024]={};\
     snprintf(buf,1024,logmsgFormat,##__VA_ARGS__);\
-    logger.log(buf);\
+    logger.Log(buf);\
 }while(0)
 #else
 #define LOG_DEBUG(logmsgFormat, ...)

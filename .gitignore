@@ -30,4 +30,5 @@ docs/book
 *.cap
 *.pcapng
 mock_client
+*.so
 #*#
