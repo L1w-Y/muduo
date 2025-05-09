@@ -55,6 +55,6 @@ void Channel::handleEventWithGuard(Timestamp recieveTime){
 
 void Channel::remove(){
     /*
-        将当前channel从事件循环中移除
+    将当前channel从事件循环中移除
     */
 }

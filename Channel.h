@@ -18,9 +18,9 @@ public:
     void remove();
     //设置回调
     void setReadCallback(ReadEventCallback cb){ readCallback_=std::move(cb); }
-    void setReadCallback(EventCallback cb){ writeCallback_=std::move(cb); }
-    void setReadCallback(EventCallback cb){ closeCallback_=std::move(cb); }
-    void setReadCallback(EventCallback cb){ errorCallback_=std::move(cb); }
+    void setWriteCallback(EventCallback cb){ writeCallback_=std::move(cb); }
+    void setCloseCallback(EventCallback cb){ closeCallback_=std::move(cb); }
+    void setErrorCallback(EventCallback cb){ errorCallback_=std::move(cb); }
 
     //  防止当channel被手动remove掉，channel还在执行回调
     void tie(const std::shared_ptr<void>&obj);
@@ -31,15 +31,13 @@ public:
     //设置返回的具体事件
     void set_revent(int revt){revents_=revt;}
 
-    bool isNoneEvent()const{return events_ ==KNoneEvent;}
-
     void enableReading(){events_ |= KReadEvent;   update();}
     void disableReading(){events_ |= ~KReadEvent; update();}
     void enableWriting(){events_ |= KWriteEvent;  update();}
     void disableWriting(){events_ |= ~KWriteEvent;  update();}
     void disableAll(){events_=KNoneEvent;update();}
     
-    bool isNoneEvent()const {return events_ ==KNoneEvent;}
+    bool isNoneEvent()const {return events_ == KNoneEvent;}
     bool isWriting()const {return events_&KWriteEvent;}
     bool isReading()const {return events_ &KReadEvent;}
     int index(){return index_;}
