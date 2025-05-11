@@ -33,9 +33,7 @@ void Channel::handleEvent(Timestamp receiveTime){
 }
 
 void Channel::update(){
-    /*
-        交给poller进行事件的更新注册
-    */
+  loop_->updateChannel(this);
 }
 
 void Channel::handleEventWithGuard(Timestamp recieveTime){
@@ -54,7 +52,5 @@ void Channel::handleEventWithGuard(Timestamp recieveTime){
 }
 
 void Channel::remove(){
-    /*
-    将当前channel从事件循环中移除
-    */
+   loop_->removeChannel(this);
 }

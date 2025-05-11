@@ -98,6 +98,7 @@ void EPollPoller::update(int operation,Channel *channel){
 
     epoll_event event;
     memset(&event,0,sizeof event);
+    //bzero
     int fd = channel->fd();
     event.data.fd = fd;
     event.events = channel->events();
