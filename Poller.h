@@ -14,7 +14,7 @@ public:
     Poller(EventLoop *loop);
     virtual ~Poller();
 
-    virtual Timestamp poll(int timeoutMs, Channel *activeChannels) = 0;
+    virtual Timestamp poll(int timeoutMs, ChannelList *activeChannels) = 0;
     virtual void updateChannel(Channel *channel) = 0;
     virtual void removeChannel(Channel *channel) = 0;
 

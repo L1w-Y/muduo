@@ -25,7 +25,31 @@ EPollPoller::~EPollPoller(){
     ::close(epollfd_);
 }
 
-Timestamp EPollPoller::poll(int timeoutMs, Channel *activeChannels){
+Timestamp EPollPoller::poll(int timeoutMs, ChannelList *activeChannels){
+
+    LOG_INFO("func=%s => fd total count:%zu\n",__FUNCTION__,listening_channels_.size());
+    int numEvents = ::epoll_wait(epollfd_,&*events_.begin(),static_cast<int>(events_.size()),timeoutMs);
+
+    int saveErrno = errno;
+    Timestamp now(Timestamp::now());
+    if(numEvents > 0){
+        LOG_INFO("%d events happened\n",numEvents);
+        fillActiveChannels(numEvents , activeChannels);
+        //如果所有事件都触发了，就进行扩容
+        if(numEvents == events_.size()){
+            events_.resize(events_.size()*2);
+        }
+    }
+    else if(numEvents == 0){
+        LOG_DEBUG("%s timeout \n",__FUNCTION__);
+    }
+    else{
+        if(saveErrno != EINTR){
+            errno = saveErrno;
+            LOG_ERROR("EPollPoller::poll（） error !");
+        }
+    }
+    return now;
 
 }
 /*
@@ -36,7 +60,7 @@ channel更新update和remove，
 */
 void EPollPoller::updateChannel(Channel *channel){
     const int index = channel->index();
-    LOG_INFO("fd=%d events=%d index=%d \n",channel->fd(),channel->events(),index);
+    LOG_INFO("func = %s fd=%d events=%d index=%d \n",__FUNCTION__,channel->fd(),channel->events(),index);
     if(index == KNew || index== KDeleted){
         if(index == KNew){
             int fd = channel->fd();
@@ -61,7 +85,7 @@ void EPollPoller::updateChannel(Channel *channel){
 void EPollPoller::removeChannel(Channel *channel){
     int fd=channel->fd();
     listening_channels_.erase(fd);
-
+    LOG_INFO("func = %s fd=%d\n",__FUNCTION__,fd);
     int index = channel->index();
     if(index==KAdded) update(EPOLL_CTL_DEL,channel);
 
@@ -87,4 +111,15 @@ void EPollPoller::update(int operation,Channel *channel){
             LOG_ERROR("epoll_ctl add/mod error:%d\n",errno);
         }
     }
+}
+
+
+void EPollPoller::fillActiveChannels(int numEvents,ChannelList *activeChannels)const{
+
+    for(int i = 0; i < numEvents; ++i){
+        auto channel = static_cast<Channel *>(events_[i].data.ptr);
+        channel->set_revent(events_[i].events);
+        activeChannels->emplace_back(channel);//将发生事件的channel给到eventloop，指针传递
+    }
+
 }

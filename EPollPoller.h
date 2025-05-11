@@ -16,7 +16,7 @@ public:
     EPollPoller(EventLoop *loop);
     ~EPollPoller()override;
     //epoll_wait操作
-    Timestamp poll(int timeoutMs, Channel *activeChannels)override;
+    Timestamp poll(int timeoutMs, ChannelList *activeChannels)override;
     //epoll_ctl操作
     void updateChannel(Channel *channel)override;
     void removeChannel(Channel *channel) override;
