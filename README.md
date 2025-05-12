@@ -16,3 +16,11 @@
 派生类构造
 
 公共的DefaultPoller.cc
+
+## eventloop
+
+三个类之间的协作
+
+线程间通信
+
+共享资源？每个thread 一个loop

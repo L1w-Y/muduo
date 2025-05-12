@@ -22,6 +22,22 @@ int createEventfd(){
 
 void EventLoop::loop(){
     looping_ = true;
+    quit_=false;
+    LOG_INFO("eventloop %p start looping \n",this);
+
+    while(!quit_){
+        activeChannels_.clear();
+        //poller监听两类fd，一类是来自client，一类是用于loop间通信的eventfd(统一会封装为channel)
+        pollReturnTime_ = poller_->poll(KPollTimeMs,&activeChannels_);
+        for(auto ch : activeChannels_)
+        {
+            ch->handleEvent(pollReturnTime_);
+        }
+        //执行当前loop循环需要处理的回调操作
+        dopendingFunctors();
+    }
+    LOG_INFO("eventloop %p stop looping \n",this);
+    looping_=false;
 
 }
 
@@ -49,8 +65,14 @@ EventLoop::EventLoop()
     wakeupChannel_->enableReading();
 }
 
+/*
+    退出事件循环，两种情况
+    1.loop在自己的线程中调用quit
+    2.在其他线程中调用quit，比如subloop调用mainloop的quit
+*/
 void EventLoop::quit(){
     quit_=true;
+    
     if(!isINLoopThread()){
         wakeup();
     }
