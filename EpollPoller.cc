@@ -88,7 +88,6 @@ void EPollPoller::removeChannel(Channel *channel){
     LOG_INFO("func = %s fd=%d\n",__FUNCTION__,fd);
     int index = channel->index();
     if(index==KAdded) update(EPOLL_CTL_DEL,channel);
-
     channel->set_index(KNew);
 
 }
