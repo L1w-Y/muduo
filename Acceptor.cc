@@ -24,7 +24,6 @@ Acceptor::Acceptor(EventLoop *loop,const InetAddress& listenAddr,bool reuseport)
 {
     acceptSocket_.setReuseAddr(true);
     acceptSocket_.setReusePort(true);
-    //acceptSocket_.setKeepAlive(true);
     acceptSocket_.bindAddress(listenAddr);
     //TcpServer::start()
     acceptChannel_.setReadCallback([this](Timestamp) {
@@ -50,7 +49,7 @@ void Acceptor::handleRead(){
     if(connfd >= 0){
         if(newConnectionCallback_)
         {
-             newConnectionCallback_(connfd,peerAddr);//轮询找到subloop，唤醒并分发新连接的channel到子loop中进行监听
+        newConnectionCallback_(connfd,peerAddr);//轮询找到subloop，唤醒并分发新连接的channel到子loop中进行监听
         }
         else
         {

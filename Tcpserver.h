@@ -20,7 +20,7 @@ public:
         KReusePort,
     };
 
-    TcpServer(EventLoop *loop,const InetAddress &listenAddr,Option option = KNoReusePort);
+    TcpServer(EventLoop *loop,const InetAddress &listenAddr,const std::string &nameArg,Option option = KNoReusePort);
     ~TcpServer();
     void setThreadInitCallback(const ThreadInitCallback &cb){ threadInitCallback_ = std::move(cb);}
     void setNewConnectionCallback(const ConnectionCallback &cb){ newConnectionCallback_ = std::move(cb);}
