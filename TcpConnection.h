@@ -12,8 +12,10 @@ class EventLoop;
 class Socket;
 
 
-class TcpConnection :noncopyable,public std::enable_shared_from_this<TcpConnection>
+class TcpConnection :noncopyable , public std::enable_shared_from_this<TcpConnection>
 {
+private:
+        enum StateE {KDisconnected,KConnecting,KConnected,KDisconnecting};
 public:
         TcpConnection(EventLoop* loop,
                 const std::string &name,
@@ -33,16 +35,18 @@ public:
         void shutdown();
         void connectEstablished();
         void connectDestroyed();
+        void setState(StateE state){state_=state;}
 private:
         void handleRead(Timestamp receiveTime);
         void handleWrite();
         void handleClose();
         void handleError();
 
-        void sendInloop(const void* message,size_t len);
+        void send(const std::string buf);
+
+        void sendInloop(const void* data,size_t len);
         void shutdownInLoop();
 
-        enum StartE{KDisconnected,KConnecting,KConnected,KDisconnecting};
         EventLoop *loop_;
         const std::string name_;
         std::atomic_int state_;

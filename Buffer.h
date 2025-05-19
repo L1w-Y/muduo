@@ -16,6 +16,8 @@
 
 class Buffer {
 public:
+    ssize_t writeFd(int fd,int *saveErrno);
+
     // 预留的头部空间，方便前置数据写入（例如在数据前插入协议头）
     static const size_t KCheapPrepend = 8;
 

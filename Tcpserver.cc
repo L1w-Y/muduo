@@ -1,7 +1,7 @@
 #include "Tcpserver.h"
 #include"Logger.h"
 #include<functional>
-EventLoop* CheckLoopNotNull(EventLoop *loop){
+static EventLoop* CheckLoopNotNull(EventLoop *loop){
     if(loop == nullptr){
         LOG_FATAL("%s:%s:%d mainloop is null \n",__FILE__,__FUNCTION__,__LINE__);
     }

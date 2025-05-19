@@ -1,6 +1,7 @@
 #include"Buffer.h"
 #include<errno.h>
 #include<sys/uio.h>
+#include<unistd.h>
 ssize_t Buffer::readFd(int fd,int* savedErrno){
     char extrabuf[65536]={};//栈上内存,最多64k
     
@@ -27,4 +28,12 @@ ssize_t Buffer::readFd(int fd,int* savedErrno){
         append(extrabuf,n-writable);
     }   
     return n;
+}
+
+ssize_t Buffer::writeFd(int fd,int *saveErrno){
+     size_t n = ::write(fd,peek(),readableBytes());
+     if(n < 0){
+        *saveErrno = errno;
+    }
+    return 0;
 }
