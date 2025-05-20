@@ -37,6 +37,7 @@ void Channel::update(){
 }
 
 void Channel::handleEventWithGuard(Timestamp recieveTime){
+    //关闭写端会触发epollhup事件
     if((revents_ & EPOLLHUP)&&!(revents_ & EPOLLIN)){
         if(closeCallback_)closeCallback_();
     }

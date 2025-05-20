@@ -30,6 +30,18 @@ public:
         const InetAddress& peerAddress()const{return peerAddr_;}
         bool connected() const{return state_ == KConnected;}
 
+        void setConnectionCallback(const ConnectionCallback& cb){ ConnectionCallback_ = cb; }
+
+        void setMessageCallback(const MessageCallback& cb){ MessageCallback_ = cb; }
+
+        void setCloseCallback(const CloseCallback& cb){closeCallback_ = cb;}
+        void setWriteCompleteCallback(const WriteCompleteCallback& cb){ WriteCompleteCallback_ = cb; }
+
+        void setHighWaterMarkCallback(const HighWaterMarkCallback& cb, size_t highWaterMark){ 
+                highwaterMarkCallback_ = cb; 
+                highWaterMark_ = highWaterMark; 
+                }
+        
         void shutdown();
         void connectEstablished();
         void connectDestroyed();

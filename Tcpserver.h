@@ -22,17 +22,17 @@ public:
 
     TcpServer(EventLoop *loop,const InetAddress &listenAddr,const std::string &nameArg,Option option = KNoReusePort);
     ~TcpServer();
-    void setThreadInitCallback(const ThreadInitCallback &cb){ threadInitCallback_ = std::move(cb);}
-    void setNewConnectionCallback(const ConnectionCallback &cb){ newConnectionCallback_ = std::move(cb);}
-    void setMessageCallback(const MessageCallback &cb){MessageCallback_=std::move(cb);}
-    void setWriteCompleteCallback(const WriteCompleteCallback &cb){WriteCompleteCallback_=std::move(cb);}
+    void setThreadInitCallback(const ThreadInitCallback &cb){ threadInitCallback_ = cb;}
+    void setNewConnectionCallback(const ConnectionCallback &cb){ newConnectionCallback_ = cb;}
+    void setMessageCallback(const MessageCallback &cb){MessageCallback_ = cb;}
+    void setWriteCompleteCallback(const WriteCompleteCallback &cb){WriteCompleteCallback_ = cb;}
     //设置底层subloop个数
     void setThreadNum(int number);
     //开起服务器监听
     void start();
 private:
     void newConnection(int sockfd,const InetAddress &peerAddr);
-    void removeConncetion(const TcpConnectionPtr &conn);
+    void removeConnection(const TcpConnectionPtr &conn);
     void removeConnectionInLoop(const TcpConnectionPtr &conn);
 
     using ConnectionMap = std::unordered_map<std::string,TcpConnectionPtr>;
