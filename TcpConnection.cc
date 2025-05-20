@@ -55,13 +55,37 @@ TcpConnection::~TcpConnection(){
     LOG_INFO("Tcpconnection::dtor[%s]at fd=%d state=%d \n",name_.c_str(),channel_->fd(),state_.load()); 
 }
 
-void TcpConnection::send(const void *message,int len){}
     
-void TcpConnection:: shutdown(){}
+void TcpConnection:: shutdown(){
+    if(state_==KConnected){
+        setState(KDisconnected);
+        loop_->runInLoop([this]{
+            this->shutdownInLoop();
+        });
+    }
+}
 
-void TcpConnection::connectEstablished(){}
+void TcpConnection::shutdownInLoop(){
+    if(!channel_->isWriting()){
+        socket_->shutdownWrite();
+    }
+}
 
-void TcpConnection::connectDestroyed(){}
+void TcpConnection::connectEstablished(){
+    setState(KConnected);
+    channel_->tie(shared_from_this());
+    channel_->enableReading();
+
+    ConnectionCallback_(shared_from_this());
+}
+
+void TcpConnection::connectDestroyed(){
+    if(state_==KDisconnected){
+        channel_->disableAll();
+        ConnectionCallback_(shared_from_this());
+    }   
+    channel_->remove();
+}
 
 void TcpConnection::handleRead(Timestamp receiveTime){
     int savedErrno = 0;
@@ -175,7 +199,7 @@ void TcpConnection::handleClose(){
     channel_->disableAll();
 
     TcpConnectionPtr connPtr(shared_from_this());
-    newConnectionCallback_(connPtr);
+    ConnectionCallback_(connPtr);
     closeCallback_(connPtr);
 }
 
@@ -195,4 +219,3 @@ void TcpConnection::handleError(){
 }
 
 
-void TcpConnection::shutdownInLoop(){}

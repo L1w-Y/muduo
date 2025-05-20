@@ -30,8 +30,6 @@ public:
         const InetAddress& peerAddress()const{return peerAddr_;}
         bool connected() const{return state_ == KConnected;}
 
-        void send(const void *message,int len);
-
         void shutdown();
         void connectEstablished();
         void connectDestroyed();
@@ -58,7 +56,7 @@ private:
         const InetAddress localAddr_;
         const InetAddress peerAddr_;
 
-        ConnectionCallback newConnectionCallback_;//有新连接的回调
+        ConnectionCallback ConnectionCallback_;//有新连接的回调
         MessageCallback MessageCallback_;//有读写消息时的回调
         WriteCompleteCallback WriteCompleteCallback_;//消息发送完成后的回调
         HighWaterMarkCallback highwaterMarkCallback_;
