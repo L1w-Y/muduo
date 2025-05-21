@@ -145,7 +145,7 @@ void TcpConnection::handleWrite(){
     }
 }
 
-void TcpConnection::send(const std::string buf){
+void TcpConnection::send(const std::string &buf){
     if(state_ == KConnected){
         if(loop_->isINLoopThread()){
             sendInloop(buf.c_str(),buf.size());

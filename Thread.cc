@@ -21,14 +21,13 @@ Thread::~Thread(){
 void Thread::start(){
     started_ = true;
     sem_t sem;
-    sem_init(&sem,false,0);
+    sem_init(&sem,false,0);// 信号量初始化为 0
     thread_ = std::make_shared<std::thread>([&](){
-        //获取tid
-        tid_ = CurrentThread::tid();
-        sem_post(&sem);
-        if(func_)func_();
+        tid_ = CurrentThread::tid();// 在新线程中获取线程 ID
+        sem_post(&sem);// 通知主线程继续
+        if(func_)func_();// 执行线程的主要任务
     });
-    sem_wait(&sem);
+    sem_wait(&sem);// 主线程等待新线程完成初始化
 }
 
 void Thread::join(){

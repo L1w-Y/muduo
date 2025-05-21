@@ -20,6 +20,7 @@ TcpServer::TcpServer(EventLoop *loop,const InetAddress &listenAddr,const std::st
 ,newConnectionCallback_()
 ,MessageCallback_()
 ,nextConnId_(1)
+,started_(0)
 {
     //新用户连接时，执行tcpserver::newconnection回调
     acceptor_->setNewConnectionCallback(

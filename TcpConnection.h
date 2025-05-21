@@ -46,13 +46,13 @@ public:
         void connectEstablished();
         void connectDestroyed();
         void setState(StateE state){state_=state;}
+        void send(const std::string &buf);
 private:
         void handleRead(Timestamp receiveTime);
         void handleWrite();
         void handleClose();
         void handleError();
 
-        void send(const std::string buf);
 
         void sendInloop(const void* data,size_t len);
         void shutdownInLoop();
