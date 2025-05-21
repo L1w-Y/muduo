@@ -29,7 +29,14 @@ TcpServer::TcpServer(EventLoop *loop,const InetAddress &listenAddr,const std::st
 }
 
 TcpServer::~TcpServer(){
+    for(auto &item : connections_){
+        TcpConnectionPtr conn(item.second);
+        item.second.reset();
 
+        conn->getLoop()->runInLoop([conn]{
+            conn->connectDestroyed();
+        });
+    }
 }
 
 //设置底层subloop个数
@@ -96,11 +103,20 @@ void TcpServer::newConnection(int sockfd,const InetAddress &peerAddr){
 }
 
 void TcpServer::removeConnection(const TcpConnectionPtr &conn){
-
+    loop_->runInLoop([this,&conn] {
+        this->removeConnectionInLoop(conn);
+    });
 }
 
 
 
 void TcpServer::removeConnectionInLoop(const TcpConnectionPtr &conn){
+        LOG_INFO("TcpServer::removeConnectionInLoop [%s] - connection %s \n",
+            name_.c_str(),conn->name().c_str());
 
+        connections_.erase(conn->name());
+        EventLoop *ioloop = conn->getLoop();
+        ioloop->queueInLoop([conn]() {
+            conn->connectDestroyed();
+        });
 }

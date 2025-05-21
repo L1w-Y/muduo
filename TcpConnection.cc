@@ -58,17 +58,34 @@ TcpConnection::~TcpConnection(){
     
 void TcpConnection:: shutdown(){
     if(state_==KConnected){
-        setState(KDisconnected);
+        setState(KDisconnecting);
         loop_->runInLoop([this]{
             this->shutdownInLoop();
         });
     }
 }
 
+/*
+    socket_->shutdownWrite();关闭写端之后，触发事件
+    loop通知channel，channel调用close回调
+    也就是Tcpconnection的handleclose方法
+    handleclose中调用tcpserver给tcpconnection设置的ConnectionCallback_和closeCallback_
+    tcpserver的回调在newConnection方法中执行，也就是连接建立时就设置完成
+*/
 void TcpConnection::shutdownInLoop(){
     if(!channel_->isWriting()){
         socket_->shutdownWrite();
     }
+}
+
+void TcpConnection::handleClose(){
+    LOG_INFO("fd=%d, state=%d\n",channel_->fd(),state_.load());
+    setState(KDisconnected);
+    channel_->disableAll();
+
+    TcpConnectionPtr connPtr(shared_from_this());
+    ConnectionCallback_(connPtr);
+    closeCallback_(connPtr);
 }
 
 void TcpConnection::connectEstablished(){
@@ -193,15 +210,7 @@ void TcpConnection::sendInloop(const void* data,size_t len){
     }
 }
 
-void TcpConnection::handleClose(){
-    LOG_INFO("fd=%d, state=%d\n",channel_->fd(),state_.load());
-    setState(KDisconnected);
-    channel_->disableAll();
 
-    TcpConnectionPtr connPtr(shared_from_this());
-    ConnectionCallback_(connPtr);
-    closeCallback_(connPtr);
-}
 
 void TcpConnection::handleError(){
     int optval;
