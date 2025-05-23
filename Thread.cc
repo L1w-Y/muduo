@@ -1,5 +1,7 @@
 #include"Thread.h"
 #include"CurrentThread.h"
+#include"Poller.h"
+#include"Logger.h"
 #include<semaphore.h>
 std::atomic<int> Thread::numCreated_{0};
 

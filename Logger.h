@@ -61,6 +61,6 @@ public:
     void setLogLevel(int level);
     void Log(std::string);
 private:
-    Logger();
+    Logger()=default;
     int LogLevel_{};
 };
