@@ -95,11 +95,11 @@ EventLoop::~EventLoop(){
 }
 
 void EventLoop::runInLoop(Functor cb){
-    if(!isINLoopThread()){
+    if(isINLoopThread()){
         cb();
     }
     else{
-        queueInLoop(cb);
+        queueInLoop(std::move(cb));
     }
 }
 
