@@ -2,7 +2,15 @@
 ## 📚 目录（Index）
 - [一、前置知识](#一前置知识)
   - [2.1 阻塞/非阻塞 与 同步/异步](#21-阻塞非阻塞-与-同步异步)
+      - [系统调用层面](#1-io系统调用层面)
+      - [应用层面](#2-应用层面)
   - [2.2 五种IO模型](#22-五种IO模型)
+      - [阻塞IO](#🟢阻塞io)
+      - [非阻塞IO](#🟢非阻塞io)
+      - [IO多路复用](#🟢io-多路复用)
+      - [Select](#🟡select)
+      - [Poll](#🟡poll)
+      - [epoll](#🟡epoll)
 
 - [Channel类](#channel类)
 
@@ -98,13 +106,8 @@
 
 ### 2.2 五种IO模型
 ####  🟢**阻塞IO**
-<video src="https://vdn3.vzuu.com/SD/34793a3a-9119-11eb-875a-e69333a856fa.mp4?auth_key=1748088990-0-0-b7483d1f82e1682bf056a347d0f267be&bu=078babd7&c=avc.0.0&disable_local_cache=1&expiration=1748088990&f=mp4&pu=078babd7&v=tx"
-       autoplay
-       muted
-       loop
-       controls
-       width="640">
-</video>
+![阻塞IO](res/阻塞io流程.gif)
+
 
 ####  🟢**非阻塞IO**
 ####  🟢**IO 多路复用**
