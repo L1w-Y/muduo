@@ -1,6 +1,6 @@
 # 万字剖析muduo高性能网络库设计细节
 
-Muduo 是一个由陈硕开发的，主要用于 Linux 服务器端的 C++ 网络库。网络库核心框架采用基于异步IO的multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo库对boost库的依赖。
+Muduo 是一个由陈硕开发的，主要用于 Linux 服务器端的 C++ 网络库。网络库核心框架采用基于同步非阻塞IO的multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo库对boost库的依赖。
 
 我会先从整体的角度对muduo库设计进行阐述，再深入细节，对每个模块的架构，设计思想，各模块协助流程，编程细节进行深入解析。
 
@@ -116,7 +116,9 @@ Muduo 是一个由陈硕开发的，主要用于 Linux 服务器端的 C++ 网�
 ---
 
 ### 1.2 五种IO模型
+
 ---
+
 #### 🟢**阻塞IO**
 在所示的这样一个传统的socket流程中，服务器端代码阻塞在了accept()和read()两个函数上
 ![阻塞IO](res/阻塞io流程.gif)
@@ -261,8 +263,104 @@ int n = read(connfd, buffer) != SUCCESS);
 
 ## 二、muduo库概述
 
+Muduo 的核心设计采用multi-reactor模型， 是`one loop per thread + thread pool 的 Reactor 变体`
+
+1. **主 Reactor(base-loop)**
+  - 当一个Tcp服务（TcpServer）启动后，并且创建一个base-loop和一个线程池管理sub-loop
+  - 主 Reactor运行在主线程中，拥有一个 baseLoop。
+  - 它的核心职责是监听新的客户端连接请求 (通过 Acceptor 组件)。
+  - 当有新的连接到达时，主 Reactor 接受 (accept) 这个连接。
+  - 主 Reactor 在接受新连接后，并不会自己处理这个连接上的后续 I/O 事件（如读写数据）。
+  - 主 Reactor 会将这个新创建的连接（TcpConnection 对象）分发给一个从 Reactor。分发策略可以是轮询或其他负载均衡算法。
+  
+2. **从 Reactors (sub-loop)**
+
+  - 通常由一个线程池管理，每个线程拥有唯一一个属于自己的EventLoop（one loop per thread）
+  - 一旦一个 TcpConnection 被分配给了一个特定的从 Reactor，那么该连接上的所有后续 I/O 事件（数据可读、可写、连接关闭等）都将由这个从 Reactor 在其所属的 I/O 线程中处理。
+
 ### 2.1 reactor模型
 
+reactor是这样一种模式，它要求主线程只负责监听fd上是否有事件发生，有事件发生时就通知工作子线程来处理，而主线程只做监听，其他什么都不做，接收新的连接，处理请求，读写数据都在工作线程中完成。
+
+---
+
+假设一个简单的 HTTP GET 请求处理流程：
+
+*   服务器已启动，主线程创建了 `epoll` 实例 (`epoll_fd`)。
+*   一个客户端已连接到服务器，服务器接受连接后得到一个客户端套接字文件描述符 `client_socket_fd`。
+
+🟢步骤 1： 主线程注册读就绪事件
+
+主线程往 `epoll` 内核事件表中注册 `client_socket_fd` 上的读就绪事件。
+
+*   **动作**：主线程调用 `epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_socket_fd, {events: EPOLLIN})`。
+*   **目的**：告诉内核：“请帮我监听 `client_socket_fd`，如果它的内核接收缓冲区里有数据了（即客户端发数据过来了），就通知我。”
+
+🟢步骤 2： 主线程等待事件
+
+主线程调用 `epoll_wait` 等待 `client_socket_fd` (或其他已注册的fd)上有事件发生。
+
+*   **动作**：主线程调用 `epoll_wait(epoll_fd, &events, max_events, timeout)`。此时主线程会阻塞（或在超时后返回）。
+*   **例子**：服务器现在空闲，等待客户端发送 HTTP 请求。
+
+🟢步骤 3：读就绪事件发生，主线程分发任务
+
+当 `client_socket_fd` 上有数据可读时，`epoll_wait` 通知主线程。主线程则将 `client_socket_fd` 可读事件放入请求队列。
+
+*   **客户端行为**：客户端发送一个 HTTP GET 请求，例如：
+    ```
+    GET /hello HTTP/1.1
+    Host: example.com
+    Connection: keep-alive
+    User-Agent: Mozilla/5.0 ...
+
+    ```
+*   **内核行为**：这段数据到达服务器内核，被放入 `client_socket_fd` 的接收缓冲区。
+*   **`epoll_wait` 返回**：由于 `client_socket_fd` 的接收缓冲区不再为空（发生了**读就绪事件** `EPOLLIN`），`epoll_wait` 从阻塞状态返回，并告诉主线程 `client_socket_fd` 现在可读。
+*   **主线程动作**：主线程将一个表示“`client_socket_fd` 可读”的任务（例如一个包含 `client_socket_fd` 和事件类型 `EPOLLIN` 的结构体）放入一个共享的请求队列中。
+
+🟢步骤 4：工作线程处理读事件及业务逻辑，并注册写事件
+
+睡眠在请求队列上的某个工作线程被唤醒，它从 `client_socket_fd` 读取数据，处理客户请求，然后往 `epoll` 内核事件表中注册该 `client_socket_fd` 上的写就绪事件。
+
+*   **工作线程动作 (读取)**：一个空闲的工作线程从请求队列中取出任务，发现是 `client_socket_fd` 的读事件。它调用 `recv(client_socket_fd, buffer, buffer_size, 0)`。
+    *   **例子**：`buffer` 中现在读入了客户端发送的 HTTP 请求数据。
+*   **工作线程动作 (处理)**：工作线程解析 HTTP 请求。假设它确定要返回一个简单的 "Hello World" 响应。它准备好了响应数据：
+    ```
+    HTTP/1.1 200 OK
+    Content-Type: text/plain
+    Content-Length: 12
+
+    Hello World!
+    ```
+*   **工作线程动作 (注册写事件)**：现在工作线程有数据要发送回客户端了。它需要确保 `client_socket_fd` 的内核发送缓冲区有空间。所以它调用 `epoll_ctl(epoll_fd, EPOLL_CTL_MOD, client_socket_fd, {events: EPOLLIN | EPOLLOUT})` (修改监听事件，在原来的 `EPOLLIN` 基础上增加 `EPOLLOUT`。如果此时不再关心客户端是否会立即发送更多数据，也可以只设置为 `EPOLLOUT`)。
+*   **目的**：告诉内核：“请帮我监听 `client_socket_fd`，如果它的内核发送缓冲区有足够空间可以让我写入数据了，就通知主线程。”
+
+🟢步骤 5：主线程再次等待事件
+
+主线程（可能在处理完其他事件后再次）调用 `epoll_wait` 等待 `client_socket_fd` (或其他fd)可写。
+
+*   **动作**：主线程调用 `epoll_wait(epoll_fd, ...)`。
+*   **注意**：此时 `epoll_wait` 也会继续监听其他已注册 fd 上的读/写事件。
+
+🟢步骤 6：写就绪事件发生，主线程分发任务
+
+当 `client_socket_fd` 可写时，`epoll_wait` 通知主线程。主线程将 `client_socket_fd` 可写事件放入请求队列。
+
+*   **内核行为**：通常情况下，socket 的发送缓冲区在大部分时间都是有可用空间的（除非网络非常拥堵，或者对端接收非常慢，导致发送缓冲区被填满）。所以，很可能在工作线程注册 `EPOLLOUT` 后，`client_socket_fd` 立刻就是可写的。
+*   **`epoll_wait` 返回**：`epoll_wait` 检测到 `client_socket_fd` 的发送缓冲区有空间（发生了**写就绪事件** `EPOLLOUT`），于是返回，并通知主线程 `client_socket_fd` 现在可写。
+*   **主线程动作**：主线程将一个表示“`client_socket_fd` 可写”的任务放入请求队列。
+
+🟢步骤 7：工作线程处理写事件
+
+睡眠在请求队列上的某个工作线程被唤醒，它往 `client_socket_fd` 上写入服务器处理客户请求的结果。
+
+*   **工作线程动作 (写入)**：一个工作线程（可能是同一个，也可能是另一个）从请求队列中取出任务，发现是 `client_socket_fd` 的写事件。它调用 `send(client_socket_fd, response_data, strlen(response_data), 0)`。
+
+*   **后续**：发送完数据后，如果工作线程没有更多数据要立即发送给这个客户端（例如，响应已经完整发送），它通常会通过 `epoll_ctl` 修改 `client_socket_fd` 的监听事件，移除 `EPOLLOUT`，以避免 `epoll_wait` 因为发送缓冲区持续可写而不断触发不必要的写就绪通知（这被称为 "busy-looping" 或 "level-triggered storm"）。它可能会重新只监听 `EPOLLIN`，等待客户端的下一个请求（如果连接是持久的，如 HTTP Keep-Alive）。如果是一次性短连接，可能会准备关闭连接。
+
+---
+![Reactor](res/reactor.png)
 
 
 ### Channel类
