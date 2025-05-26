@@ -24,14 +24,15 @@ Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。�
       - [异步](#🟢异步)
 - [二、muduo库概述](#二muduo库概述)
   - [2.1 Reactor模型](#21-reactor模型)
-- [Channel类](#channel类)
-
-- [Poller类](#poller类)
-
-- [EventLoop](#eventloop)
-  - [三个类之间的协作](#三个类之间的协作)
-  - [线程间通信](#线程间通信)
-  - [共享资源？每个thread一个loop](#共享资源每个thread-一个loop)
+  - [2.2 muduo库核心架构](#22-muduo库核心架构)
+- [三、辅助模块](#三辅助模块)
+- [四、multi-Reactor事件循环模块](#四multi-reactor事件循环模块)
+- [五、线程池模块](#五线程池模块)
+- [六、Tcp通信模块](#六tcp通信模块)
+- [七、模块间通信](#七模块间通信)
+- [八、工作流程](#八工作流程)
+- [九、总结](#九总结)
+- [参考](#参考文章)
 
 ## 一、前置知识
 
@@ -265,21 +266,6 @@ int n = read(connfd, buffer) != SUCCESS);
 
 ## 二、muduo库概述
 
-Muduo 的核心设计采用multi-reactor模型， 是`one loop per thread + thread pool 的 Reactor 变体`
-
-1. **主 Reactor(base-loop)**
-  - 当一个Tcp服务（TcpServer）启动后，并且创建一个base-loop和一个线程池管理sub-loop
-  - 主 Reactor运行在主线程中，拥有一个 baseLoop。
-  - 它的核心职责是监听新的客户端连接请求 (通过 Acceptor 组件)。
-  - 当有新的连接到达时，主 Reactor 接受 (accept) 这个连接。
-  - 主 Reactor 在接受新连接后，并不会自己处理这个连接上的后续 I/O 事件（如读写数据）。
-  - 主 Reactor 会将这个新创建的连接（TcpConnection 对象）分发给一个从 Reactor。分发策略可以是轮询或其他负载均衡算法。
-  
-2. **从 Reactors (sub-loop)**
-
-  - 通常由一个线程池管理，每个线程拥有唯一一个属于自己的EventLoop（one loop per thread）
-  - 一旦一个 TcpConnection 被分配给了一个特定的从 Reactor，那么该连接上的所有后续 I/O 事件（数据可读、可写、连接关闭等）都将由这个从 Reactor 在其所属的 I/O 线程中处理。
-
 ### 2.1 reactor模型
 
 reactor是这样一种模式，它要求主线程只负责监听fd上是否有事件发生，有事件发生时就通知工作子线程来处理，而主线程只做监听，其他什么都不做，接收新的连接，处理请求，读写数据都在工作线程中完成。
@@ -365,50 +351,61 @@ reactor是这样一种模式，它要求主线程只负责监听fd上是否有�
 
 ![Reactor](res/reactor.png)
 
+![Reactor](res/muduo模型.png)
+
 ---
 
 ### 2.2 muduo库核心架构
 
+Muduo 的核心设计采用multi-reactor模型， 是`one loop per thread + thread pool 的 Reactor 变体`
+
+1. **主 Reactor(base-loop)**
+  - 当一个Tcp服务（TcpServer）启动后，并且创建一个base-loop和一个线程池管理sub-loop
+  - 主 Reactor运行在主线程中，拥有一个 baseLoop。
+  - 它的核心职责是监听新的客户端连接请求 (通过 Acceptor 组件)，和分配新连接。
+  - 当有新的连接到达时，主 Reactor 接受 (accept) 这个连接。
+  - 主 Reactor 在接受新连接后，并不会自己处理这个连接上的后续 I/O 事件（如读写数据）。
+  - 主 Reactor 会将这个新创建的连接（TcpConnection 对象）分发给一个从 Reactor。分发策略可以是轮询或其他负载均衡算法。
+  
+2. **从 Reactors (sub-loop)**
+
+  - 通常由一个线程池管理，每个线程拥有唯一一个属于自己的EventLoop（one loop per thread）
+  - 子loop的数量通常是根据内核数量分配
+  - 一旦一个 TcpConnection 被分配给了一个特定的从 Reactor，那么该连接上的所有后续 I/O 事件（数据可读、可写、连接关闭等）都将由这个从 Reactor 在其所属的 I/O 线程中处理。
+
+
+![muduo](res/multi架构.jpg)
 
 
 我主要将muduo库分为四大模块：
+
+
+- **📌辅助模块**
 - **📌multi-Reactor事件循环模块**
 - **📌线程池模块**
 - **📌Tcp通信模块**
-- **📌辅助模块**
-
-在深入muduo库源码时，会发现里面有相当灵活和复杂的回调机制，在不同类不同模块之间传递，这使得muduo库中各个模块充分解耦，职责分明，但相互之间又紧密协同，只有理清各个模块的架构和工作过程，才能真正一探muduo库的设计思想。
 
 
+在深入muduo库源码时，会发现里面有相当灵活且复杂的回调机制，在不同类不同模块之间传递，这使得muduo库中各个模块充分解耦，职责分明，但相互之间又紧密协同，只有理清各个模块的架构和工作过程，才能真正一探muduo库的设计思想。
 
-### Channel类
-       
-设计思想 
-        
-作用     
-        
-代码细节 
-        
-### Poller类
-作用    
 
-设计方法，静态工厂
+## 三、辅助模块
 
-抽象接口
+## 四、multi-Reactor事件循环模块
 
-派生类构造
+## 五、线程池模块
 
-公共的DefaultPoller.cc
+## 六、Tcp通信模块
 
-### eventloop
+## 七、模块间通信
 
-三个类之间的协作
+## 八、工作流程
 
-线程间通信
+## 九、总结
 
-共享资源？每个thread 一个loop
+## 参考文章
 
-### Thread EventLoopThread EventLoopThreadPool
+## Thread EventLoopThread EventLoopThreadPool
 
 EventLoopThread的逻辑是
 构造时将thread_(std::bind(&EventLoopThread::threadFunc,this),name)绑定，作为thread类的func_回调在调用startLoop时，调用thread_.start()，创建子线程用智能指针管理，然后子线程内部又调用func_（），也就是EventLoopThread的threadFunc()方法，在这个方法内创建了一个loop,调用外部传给的EventLoopThread的callback_，然后在这个threadFunc()回调中执行loop.loop();
