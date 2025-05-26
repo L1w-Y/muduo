@@ -1,4 +1,13 @@
 # 万字剖析muduo高性能网络库设计细节
+
+Muduo 是一个由陈硕开发的，主要用于 Linux 服务器端的 C++ 网络库。网络库核心框架采用基于异步IO的multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo库对boost库的依赖。
+
+我会先从整体的角度对muduo库设计进行阐述，再深入细节，对每个模块的架构，设计思想，各模块协助流程，编程细节进行深入解析。
+
+本人出于个人学习的目的写下这篇文章，如有讲解错误的地方，欢迎提出，一起交流，下面进入正题。
+
+---
+
 ## 📚 目录（Index）
 - [一、前置知识](#一前置知识)
   - [1.1 阻塞/非阻塞 与 同步/异步](#11-阻塞非阻塞-与-同步异步)
@@ -22,10 +31,10 @@
   - [三个类之间的协作](#三个类之间的协作)
   - [线程间通信](#线程间通信)
   - [共享资源？每个thread一个loop](#共享资源每个thread-一个loop)
-  
+
 ## 一、前置知识
 
-在进入正题之前，先聊一聊网络编程中一些重要的基本概念。
+在对muduo库进行正式剖析之前，先聊一聊网络编程中一些重要的基本概念。
 
 ### 1.1 阻塞/非阻塞 与 同步/异步
 
@@ -250,7 +259,13 @@ int n = read(connfd, buffer) != SUCCESS);
 
 ---
 
-## Channel类
+## 二、muduo库概述
+
+### 2.1 reactor模型
+
+
+
+### Channel类
        
 设计思想 
         
@@ -258,7 +273,7 @@ int n = read(connfd, buffer) != SUCCESS);
         
 代码细节 
         
-## Poller类
+### Poller类
 作用    
 
 设计方法，静态工厂
@@ -269,7 +284,7 @@ int n = read(connfd, buffer) != SUCCESS);
 
 公共的DefaultPoller.cc
 
-## eventloop
+### eventloop
 
 三个类之间的协作
 
@@ -277,7 +292,7 @@ int n = read(connfd, buffer) != SUCCESS);
 
 共享资源？每个thread 一个loop
 
-## Thread EventLoopThread EventLoopThreadPool
+### Thread EventLoopThread EventLoopThreadPool
 
 EventLoopThread的逻辑是
 构造时将thread_(std::bind(&EventLoopThread::threadFunc,this),name)绑定，作为thread类的func_回调在调用startLoop时，调用thread_.start()，创建子线程用智能指针管理，然后子线程内部又调用func_（），也就是EventLoopThread的threadFunc()方法，在这个方法内创建了一个loop,调用外部传给的EventLoopThread的callback_，然后在这个threadFunc()回调中执行loop.loop();
