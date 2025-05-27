@@ -1,6 +1,6 @@
 # 万字剖析muduo高性能网络库设计细节
 
-Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。网络库核心框架采用基于同步非阻塞IO的multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo库对boost库的依赖。
+Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。网络库核心框架采用基于同步非阻塞IO的multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo对boost库的依赖。
 
 我会先从整体的角度对muduo库设计进行阐述，再深入细节，对每个模块的架构，设计思想，各模块协助流程，编程细节进行深入解析。
 
@@ -390,6 +390,203 @@ Muduo 的核心设计采用multi-reactor模型， 是`one loop per thread + thre
 
 
 ## 三、辅助模块
+
+### 3.1 noncopyable
+直接继承这样一个抽象的禁止拷贝和赋值基类，减少重复书写
+- 构造和析构设计为protected，使基类无法被直接实例化，但允许派生类正常构造和析构
+```cpp
+class noncopyable{
+public:
+    noncopyable(const noncopyable&)=delete;
+    noncopyable& operator=(const noncopyable&)=delete;
+protected:
+    noncopyable()=default;
+    ~noncopyable()=default;
+};
+```
+
+### 3.2 Logger 日志模块
+定义了四种日志级别：
+- INFO：普通日志输出
+- ERROR：记录不影响程序运行的错误
+- FATAL：记录重要错误，程序会因此退出
+- DEBUG：调试信息，仅在调试模式下生效
+```cpp
+enum LogLevel{
+    INFO,
+    ERROR,
+    FATAL,
+    DEBUG,
+};
+```
+- Logger类结构如下：
+```cpp
+class Logger : noncopyable{
+public:
+    static Logger& instance();
+    void setLogLevel(int level);
+    void Log(std::string);
+private:
+    Logger()=default;
+    int LogLevel_{};
+};
+```
+- `static Logger& instance():`
+```cpp
+Logger& Logger::instance(){
+    static Logger Logger;
+    return Logger;
+}
+```
+获取 Logger 单例,使用静态局部变量确保只创建一个实例
+- `void setLogLevel(int level):`
+```cpp
+void Logger::setLogLevel(int level){
+    LogLevel_=level;
+}
+```
+公用接口，用于设置当前日志实例的日志级别。每次调用日志宏时，都会先调用此方法设置对应的级别。
+
+- `void Log(std::string msg):`
+```cpp
+void Logger::Log(std::string msg){
+    // 根据 LogLevel_ 输出级别前缀
+    switch (LogLevel_)
+    {
+    case INFO:  std::cout<<"[INFO]";  break;
+    case ERROR: std::cout<<"[ERROR]"; break;
+    case FATAL: std::cout<<"[FATAL]"; break;
+    case DEBUG: std::cout<<"[DEBUG]"; break;
+    default: break;
+    }
+    // 打印实际消息和时间戳
+    std::cout << msg;
+    std::cout << ":" << Timestamp::now().toString() << std::endl;
+}
+```
+
+这是实际执行日志输出的方法。它会根据当前设置的 LogLevel_ 输出对应的级别标签（如 [INFO]），然后输出用户提供的消息和时间戳。
+
+- `日志宏 (LOG_INFO, LOG_ERROR, LOG_FATAL, LOG_DEBUG): 这些宏是用户与日志系统交互的主要方式。以 LOG_INFO 为例：`
+
+```cpp
+#define LOG_INFO(logmsgFormat, ...) \
+    do{ \
+        Logger &logger = Logger::instance(); \       // 1. 获取 Logger 单例
+        logger.setLogLevel(INFO); \                 // 2. 设置当前日志级别为 INFO
+        char buf[1024]={}; \                       // 3. 创建一个缓冲区
+        snprintf(buf,1024,logmsgFormat,##__VA_ARGS__); \ // 4. 使用 snprintf 格式化日志消息
+        logger.Log(buf); \                          // 5. 调用 Log 方法输出
+    }while(0)
+```
+
+
+### 3.3 Buffer 缓冲区
+这个类的设计是提供一个灵活且高效的内存缓冲区，在tcp连接中收发消息提供一个灵活的缓冲区
+
+设计结构如下：
+![buffer](res/buffer.png)
+这个缓冲区在概念上被划分为三个主要部分：
+
+1. 头部预留字节（8字节）
+   - 这是缓冲区开头预留的一块空间
+   - 主要目的是让你能够高效地在现有内容之前添加数据。这在网络协议中非常常见，比如你可能收到了数据负载，然后需要在前面加上长度字段或协议头
+   - KCheapPrepend 常量定义了这个区域的初始大小
+2. 可读字节空间
+   - 这是缓冲区中实际存储的、准备好被读取或处理的数据
+   - readerIndex_ 指向这部分数据的开始
+   - writeIndex_ 指向这部分数据的结束，同时也是可写字节空间的开始位置
+   - 如果读空间有数据，那么下一次写入数据将是紧接着数据末尾
+3. 可写字节空间（从 writeIndex_ 到 buffer_.size() - 1）
+   - 这是缓冲区末尾的空闲空间，新数据被写入到这个位置
+   - writeIndex_ 指向这个区域的开始
+
+- `一些功能性的对外接口`
+```cpp
+// 返回可读字节数（写指针 - 读指针）
+    size_t readableBytes() const {
+        return writeIndex_ - readerIndex_;
+    }
+
+    // 返回可写字节数（缓冲区总大小 - 写指针）
+    size_t writableBytes() const {
+        return buffer_.size() - writeIndex_;
+    }
+
+    // 返回前置空间的大小（读指针之前的区域,包含头部）
+    size_t prependableBytes() const {
+        return readerIndex_;
+    }
+
+    char* beginWrite(){
+        return begin() + writeIndex_;
+    }
+    const char* beginWrite() const {
+        return begin() + writeIndex_;
+    }
+```
+- `读取数据`
+```cpp
+    const char* peek() const {
+        return begin() + readerIndex_;
+    }
+
+    // 读取所有可读数据并以 std::string 返回，同时清空缓冲区
+    std::string retrieveAllAsString() {
+        return retrieveAsString(readableBytes());
+    }
+
+    // 读取 len 长度的数据并返回为 string，同时推进读指针
+    std::string retrieveAsString(size_t len) {
+        std::string result(peek(), len); // 从 peek 开始复制 len 字节
+        retrieve(len);                   // 读取后移动读指针
+        return result;
+    }
+
+        // 读取 len 长度的数据，相当于向前推进 readerIndex_
+    void retrieve(size_t len) {
+        if (len < readableBytes()) {
+            // 只推进部分读指针
+            readerIndex_ += len;
+        } else {
+            // 如果要读的长度超过了可读数据，则全部清空
+            retrieveAll();
+        }
+    }
+
+    // 清空所有数据，重置读写指针
+    void retrieveAll() {
+        readerIndex_ = writeIndex_ = KCheapPrepend;
+    }
+```
+- `扩容思路和方法`
+```cpp
+    
+    void append(const char *data,size_t len){
+        ensureWriteableBytes(len);
+        std::copy(data,data+len,beginWrite());
+        writeIndex_ += len;
+    }
+
+    void ensureWriteableBytes(size_t len){
+        if(writableBytes()<len){
+            makeSpace(len);
+        }
+    }
+    void makeSpace(size_t len){
+    if(writableBytes()+prependableBytes() < len + KCheapPrepend){
+        buffer_.resize(writeIndex_+len);
+    }else{
+        size_t readable = readableBytes();
+        std::copy(begin() + readerIndex_, begin()+writeIndex_, begin()+KCheapPrepend);
+        readerIndex_=KCheapPrepend;
+        writeIndex_= readerIndex_+readable;
+      }
+    }
+```
+在每次插入数据之前，调用ensureWriteableBytes接口确保buffer缓冲区有足够的写入空间，如果不够，就调用makeSpace方法进行扩容
+
+
 
 ## 四、multi-Reactor事件循环模块
 
