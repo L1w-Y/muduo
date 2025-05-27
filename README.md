@@ -26,6 +26,9 @@ Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。�
   - [2.1 Reactor模型](#21-reactor模型)
   - [2.2 muduo库核心架构](#22-muduo库核心架构)
 - [三、辅助模块](#三辅助模块)
+  - [3.1 noncopyable](#31-noncopyable)
+  - [3.2 Logger日志模块](#32-logger-日志模块)
+  - [3.3 buffer缓冲区](#33-buffer-缓冲区)  
 - [四、multi-Reactor事件循环模块](#四multi-reactor事件循环模块)
 - [五、线程池模块](#五线程池模块)
 - [六、Tcp通信模块](#六tcp通信模块)
@@ -391,7 +394,10 @@ Muduo 的核心设计采用multi-reactor模型， 是`one loop per thread + thre
 
 ## 三、辅助模块
 
+---
+
 ### 3.1 noncopyable
+
 直接继承这样一个抽象的禁止拷贝和赋值基类，减少重复书写
 - 构造和析构设计为protected，使基类无法被直接实例化，但允许派生类正常构造和析构
 ```cpp
@@ -404,8 +410,10 @@ protected:
     ~noncopyable()=default;
 };
 ```
+---
 
 ### 3.2 Logger 日志模块
+
 定义了四种日志级别：
 - INFO：普通日志输出
 - ERROR：记录不影响程序运行的错误
@@ -480,12 +488,14 @@ void Logger::Log(std::string msg){
     }while(0)
 ```
 
+---
 
 ### 3.3 Buffer 缓冲区
 这个类的设计是提供一个灵活且高效的内存缓冲区，在tcp连接中收发消息提供一个灵活的缓冲区
 
 设计结构如下：
 ![buffer](res/buffer.png)
+
 这个缓冲区在概念上被划分为三个主要部分：
 
 1. 头部预留字节（8字节）
@@ -586,7 +596,18 @@ void Logger::Log(std::string msg){
 ```
 在每次插入数据之前，调用ensureWriteableBytes接口确保buffer缓冲区有足够的写入空间，如果不够，就调用makeSpace方法进行扩容
 
+扩容前首先进行判断：`if(writableBytes()+prependableBytes() < len + KCheapPrepend)`
+表示：可写入的空间+ read指针前的空间**是否大于**写入数据长度+len
+1. `否`
+   那就直接resize()开辟空间
+2. `是` 
+    代表：可读数据中头部有部分数据已经被读走，前面空出的空间+剩余的可写空间已经够大，就不用重新开辟
+    将剩余的未读数据移动到头部，然后将可用空间拼接起来再利用，如图：
+    ![扩容](res/扩容.png)
 
+- `🟢缓冲区读写操作`
+1. ssize_t Buffer::readFd(int fd, int* savedErrno)
+从一个给定的 fd 中读取数据，将其存入 Buffer 中
 
 ## 四、multi-Reactor事件循环模块
 
