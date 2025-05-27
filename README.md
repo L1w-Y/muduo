@@ -267,7 +267,7 @@ int n = read(connfd, buffer) != SUCCESS);
 
 ---
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 二、muduo库概述
 
@@ -393,11 +393,9 @@ Muduo 的核心设计采用multi-reactor模型， 是`one loop per thread + thre
 
 在深入muduo库源码时，会发现里面有相当灵活且复杂的回调机制，在不同类不同模块之间传递，这使得muduo库中各个模块充分解耦，职责分明，但相互之间又紧密协同，只有理清各个模块的架构和工作过程，才能真正一探muduo库的设计思想。
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 三、辅助模块
-
----
 
 ### 3.1 noncopyable
 
@@ -608,39 +606,133 @@ void Logger::Log(std::string msg){
     将剩余的未读数据移动到头部，然后将可用空间拼接起来再利用，如图：
     ![扩容](res/扩容.png)
 
-- `🟢缓冲区读写操作`
-1. ssize_t Buffer::readFd(int fd, int* savedErrno)
+- `🟢缓冲区读操作`
+
 从一个给定的 fd 中读取数据，将其存入 Buffer 中
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+```cpp
+    ssize_t Buffer::readFd(int fd, int* savedErrno) {
+    // 在栈上创建一个临时缓冲区，大小为 65536 字节 (64KB)
+    char extrabuf[65536] = {}; 
+
+    // 定义一个 iovec 结构体数组，用于 readv 系统调用
+    // iovec 结构体用于描述一块内存区域
+    // readv 可以一次性从文件描述符读取数据到多个不连续的内存区域
+    struct iovec vec[2];
+
+    // 获取当前 Buffer 中可写字节数
+    const size_t writable = writableBytes();
+
+    // 设置第一个 iovec 结构体：指向 Buffer 内部的可写空间
+    vec[0].iov_base = begin() + writeIndex_; // 可写区域的起始地址
+    vec[0].iov_len = writable;              // 可写区域的长度
+
+    // 设置第二个 iovec 结构体：指向栈上的临时缓冲区 extrabuf
+    vec[1].iov_base = extrabuf;
+    vec[1].iov_len = sizeof extrabuf;       // extrabuf 的总大小
+    const int iovcnt = (writable < sizeof extrabuf) ? 2 : 1;
+
+    // 调用 readv 系统调用从 fd 读取数据到 vec 指定的内存区域
+    // readv 会先尝试填满 vec[0]，如果还有数据且iovcnt是2，再尝试填满 vec[1]
+    const ssize_t n = ::readv(fd, vec, iovcnt);
+
+    // 处理 readv 的返回值
+    if (n < 0) {
+        // 读取出错，保存错误码
+        *savedErrno = errno;
+    } else if (static_cast<size_t>(n) <= writable) {
+        // 读取成功，并且所有读取到的数据都成功存入了 Buffer 内部的可写空间 (vec[0])
+        // 直接增加写指针 writeIndex_
+        writeIndex_ += n;
+    } else {
+        // 读取成功，但读取到的数据量 n 超过了 Buffer 内部初始的可写空间 writable
+        // 这意味着数据一部分存入了 vec[0]，剩下的存入了 extrabuf (vec[1])
+        // 首先，Buffer 内部的可写空间已全部被填满
+        writeIndex_ = buffer_.size(); // 将写指针移到 Buffer 的末尾
+        // 然后，将 extrabuf 中超出 writable 部分的数据追加到 Buffer 中
+        // n - writable 是实际存储在 extrabuf 中的数据量
+        // append 函数会负责处理 Buffer 空间的扩展
+        append(extrabuf, n - writable);
+    }
+    return n;
+}
+
+```
+
+**使用了 readv 和 struct iovec 结合实现一次性从文件描述符读取数据到多个不连续的内存块中**
+1. 在栈上声明一个字符数组，大小为 65536 字节（64KB），用来当作缓冲区的缓冲区
+2. struct iovec vec[2]
+   - iovec 结构体数组，用于 readv 和 writev 系统调用，它定义了一个内存区域（内存起始地址和长度）。iovec 结构体包含两个元素：
+   ```cpp
+    struct iovec {
+    void  *iov_base;    /* Starting address */
+    size_t iov_len;     /* Number of bytes to transfer */
+        };
+3. 把数组第一块内存定义为buffer的写缓冲区，第二块内存设置为栈上缓冲区exterbuf
+4. **🌟const int iovcnt = (writable < sizeof extrabuf) ? 2 : 1;🌟**
+   - 决定 readv 调用中 iovec 数组的实际使用数量 (iovcnt)
+   - 逻辑：
+     - 如果 Buffer 的可写空间 writable 小于 extrabuf 的大小（64KB），那么我们同时使用 Buffer 的内部空间和 extrabuf (即 iovcnt = 2)。这样做的目的是，如果读取的数据很多，先填满 Buffer 的可写部分，多余的再放入 extrabuf。 之后再调用append把extrabuf的内容写入可写空间中，这个时候会对buffer进行一次扩容（调用makeSpace）
+    
+     - 如果 Buffer 的可写空间 writable 大于等于 extrabuf 的大小，那么只使用 Buffer 的内部空间 (iovcnt = 1)。因为即使 extrabuf 能提供的空间（64KB）都填满了，Buffer 自身也还有空间。**这个情况就是一次读的数据保证大于64k，但是如果这一次已经把大于64k的可写空间都填满了，那剩下的也不管了，下一次调用的时候再来读**
+5. const ssize_t n = ::readv(fd, vec, iovcnt)；调用readv 读fd上的数据
+   - 参数： 
+        - fd: 文件描述符
+        - iov: iovec 结构体数组
+        - iovcnt: iov 数组的元素个数
+    - 返回值：
+        - 成功时返回读取的总字节数
+        - 失败时返回 -1 并设置 errno
+   - readv 会按照 vec 数组中元素的顺序填充数据：首先填满 vec[0] 指向的内存区域，如果还有数据且 iovcnt 大于1，则接着填满 vec[1] 指向的区域
+6. 返回写入的字节数
+
+这种设计的好处：
+- 采用readv来读取数据，这样只会调用一次系统io操作，避免频繁的内核到用户的数据拷贝
+- 处理大数据块：通过结合内部缓冲区和栈上的 extrabuf，读取可能超过当前 Buffer 可写容量的数据
+
+- `🟢缓冲区写操作`
+
+就是是将 Buffer 中当前可读的数据全部写入到指定的文件描述符 fd 中
+```cpp
+ssize_t Buffer::writeFd(int fd,int *saveErrno){
+     size_t n = ::write(fd,peek(),readableBytes());
+     if(n < 0){
+        *saveErrno = errno;
+    }
+    return n;
+}
+```
+
+
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 四、multi-Reactor事件循环模块
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 五、线程池模块
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 六、Tcp通信模块
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 七、模块间通信
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 八、工作流程
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 九、总结
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 参考文章
 
-<p align="right"><a href="#top">回到顶部⬆️</a></p>
+<p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## Thread EventLoopThread EventLoopThreadPool
 
