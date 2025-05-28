@@ -30,6 +30,10 @@ Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。�
   - [3.2 Logger日志模块](#32-logger-日志模块)
   - [3.3 buffer缓冲区](#33-buffer-缓冲区)  
 - [四、multi-Reactor事件循环模块](#四multi-reactor事件循环模块)
+  - [4.1 Channel 类](#41-channel-类)
+  - [4.2 Poller](#42-poller)
+  - [4.3 EpollPoller](#43-epollpoller)
+  - [4.4 EventLoop](#44-eventloop)
 - [五、线程池模块](#五线程池模块)
 - [六、Tcp通信模块](#六tcp通信模块)
 - [七、模块间通信](#七模块间通信)
@@ -843,7 +847,140 @@ private:
 
 
 ### 4.3 EpollPoller
+这个类是 Poller 接口的一个具体实现，通过 epoll I/O 来监听事件
+```cpp
+class EPollPoller : public Poller
+{
+public:
+    //构造中进行epoll_create
+    EPollPoller(EventLoop *loop);
+    ~EPollPoller() override ;
+    //epoll_wait操作
+    Timestamp poll(int timeoutMs, ChannelList *activeChannels)override;
+    //epoll_ctl操作
+    void updateChannel(Channel *channel)override;
+    void removeChannel(Channel *channel) override;
+private:
+    static const int KInitEventListSize = 16;
 
+    void fillActiveChannels(int numEvents,ChannelList *activeChannels)const;
+    void update(int operation,Channel *channel);
+
+    using EventList = std::vector<epoll_event>;
+    int epollfd_; //epoll句柄
+    EventList events_;
+};
+```
+1. **构造函数**
+
+    创建epoll句柄
+    ```cpp
+    EPollPoller::EPollPoller(EventLoop *loop)
+    :Poller(loop),
+    epollfd_(::epoll_create1(EPOLL_CLOEXEC)),
+    events_(KInitEventListSize)
+    {
+        if(epollfd_<0){
+            LOG_FATAL("epoll_create error:%d \n",errno);
+        }
+    }
+    ```
+
+2. **updateChannel**
+
+    在上面聊到channel注册感兴趣的事件时，最终的调用就会来到这个位置
+    ```cpp
+    void EPollPoller::updateChannel(Channel *channel){
+        const int index = channel->index();
+        LOG_INFO("func = %s fd=%d events=%d index=%d \n",__FUNCTION__,channel->fd(),channel->events(),index);
+        if(index == KNew || index== KDeleted){
+            if(index == KNew){
+                int fd = channel->fd();
+                listening_channels_[fd]=channel;
+            }
+            channel->set_index(KAdded);
+            update(EPOLL_CTL_ADD,channel);
+        }
+        else{ //channel已经注册过
+            int fd = channel->fd();
+            if(channel->isNoneEvent()){
+                update(EPOLL_CTL_DEL,channel);
+                channel->set_index(KDeleted);
+            }
+            else{
+                update(EPOLL_CTL_MOD,channel);
+            }
+        }
+    }
+
+    void EPollPoller::update(int operation,Channel *channel){
+
+        epoll_event event;
+        memset(&event,0,sizeof event);
+        //bzero
+        int fd = channel->fd();
+        event.data.fd = fd;
+        event.events = channel->events();
+        event.data.ptr = channel;
+        
+        if(::epoll_ctl(epollfd_,operation,fd,&event)<0){
+            if(operation==EPOLL_CTL_DEL){
+                LOG_ERROR("epoll_ctl del error:%d\n",errno);
+            }
+            else{
+                LOG_ERROR("epoll_ctl add/mod error:%d\n",errno);
+            }
+        }
+    }
+
+    ```
+    1. 将从eventloop传递过来的channel存入Poller中维护的map（listening_channels_）,键值对就是 fd : channel
+    2. 调用私有update函数，在其中调用epoll_ctl，真正将事件注册到内核红黑树上
+    3. 在update中又将epoll_event的ptr指向channel，实现fd和channel的绑定
+        ```cpp
+                typedef union epoll_data
+        {
+        void *ptr;
+        int fd;
+        uint32_t u32;
+        uint64_t u64;
+        } epoll_data_t;
+
+        struct epoll_event
+        {
+        uint32_t events;	/* Epoll events */
+        epoll_data_t data;	/* User data variable */
+        } __EPOLL_PACKED;
+        ```
+
+3. poll阻塞监听
+这是 EPollPoller 等待I/O事件的真正调用
+```cpp
+Timestamp EPollPoller::poll(int timeoutMs, ChannelList *activeChannels){
+    LOG_INFO("func=%s => fd total count:%zu\n",__FUNCTION__,listening_channels_.size());
+    int numEvents = ::epoll_wait(epollfd_,&*events_.begin(),static_cast<int>(events_.size()),timeoutMs);
+    int saveErrno = errno;
+    Timestamp now(Timestamp::now());
+    if(numEvents > 0){
+        LOG_INFO("%d events happened\n",numEvents);
+        fillActiveChannels(numEvents , activeChannels);
+        //如果所有事件都触发了，就进行扩容
+        if(numEvents == events_.size()){
+            events_.resize(events_.size()*2);
+        }
+    }
+    else if(numEvents == 0){
+        LOG_DEBUG("%s timeout \n",__FUNCTION__);
+    }
+    else{
+        if(saveErrno != EINTR){
+            errno = saveErrno;
+            LOG_ERROR("EPollPoller::poll（） error !");
+        }
+    }
+    return now;
+}
+```
 
 ### 4.4 Eventloop
 
