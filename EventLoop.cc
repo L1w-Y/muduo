@@ -47,6 +47,7 @@ EventLoop::EventLoop()
     ,callingPendingFunctors_(false)
     ,threadId_(CurrentThread::tid())
     ,poller_(Poller::newDefaultPoller(this))
+    ,wakeupFd_(createEventfd())
     ,wakeupChannel_(new Channel(this,wakeupFd_))
     ,currentActiveChannel_(nullptr)
 {

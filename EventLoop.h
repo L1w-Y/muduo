@@ -42,7 +42,6 @@ private:
     std::atomic_bool looping_;
     std::atomic_bool quit_;
 
-
     const pid_t threadId_;//当前loop所在的线程id
     Timestamp pollReturnTime_;//poller返回的发生时间的channels的时间点
     std::unique_ptr<Poller> poller_;

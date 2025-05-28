@@ -983,7 +983,161 @@ Timestamp EPollPoller::poll(int timeoutMs, ChannelList *activeChannels){
 ```
 
 ### 4.4 Eventloop
+EventLoop 类的核心职责
+1. 事件循环：运行一个循环，不断地查询（poll）是否有事件发生。
+1. I/O 多路复用：通过一个 Poller 对象来监听多个文件描述符上的I/O事件。
+1. 事件分发：Poller 检测到事件时，EventLoop 将事件分发给对应的 Channel 对象进行处理。
+2. 执行回调任务：允许其他线程安全地将回调函数提交到 EventLoop 所在的线程中执行，以避免跨线程直接操作共享数据带来的竞态条件。
+3. 线程专属：一个 EventLoop 对象对应一个线程，确保所有与该循环相关的操作都在同一个线程中执行。
 
+先看类设计：
+```cpp
+class EventLoop : noncopyable
+{
+public:
+    using Functor = std::function<void()>;
+    EventLoop();
+    ~EventLoop();
+    
+    void loop();//开起事件循环
+    void quit();//退出事件循环
+
+    Timestamp pollReturnTime() const{return pollReturnTime_;}
+    void runInLoop(Functor cb);//在当前loop执行cb
+    void queueInLoop(Functor cb);//把cb放入队列，幻想loop所在线程，执行cb
+
+    void wakeup();//唤醒loop所在线程
+    /*
+        ==》调用poller的方法
+    */
+    void updateChannel(Channel *channel);
+    void removeChannel(Channel *channel);
+    bool hasChannel(Channel *Channel);
+    
+    bool isINLoopThread()const {return threadId_==CurrentThread::tid();}
+private:
+
+    void handleRead();//wake up
+    void dopendingFunctors();//执行回调
+
+    using ChannelList = std::vector<Channel*>;
+    std::atomic_bool looping_;
+    std::atomic_bool quit_;
+
+    const pid_t threadId_;//当前loop所在的线程id
+    Timestamp pollReturnTime_;//poller返回的发生时间的channels的时间点
+    std::unique_ptr<Poller> poller_;
+
+    int wakeupFd_;//当mainloop获取新的channel，轮询选择subloop,通过wakeupFd_唤醒subloop
+    std::unique_ptr<Channel> wakeupChannel_;//eventloop不操作fd，统一封装为channel，wakeupChannel_封装wakeupFd_
+
+    ChannelList activeChannels_;
+    Channel *currentActiveChannel_;
+
+    std::atomic_bool callingPendingFunctors_;//当前loop是否有需要执行的回调
+    std::vector<Functor> pendingFunctors_;//储存loop所需要的所有回调操作
+    std::mutex mutex_;//线程安全
+};
+```
+🟢 构造函数
+```cpp
+EventLoop::EventLoop()
+    : looping_(false)
+    ,quit_(false)
+    ,callingPendingFunctors_(false)
+    ,threadId_(CurrentThread::tid())
+    ,poller_(Poller::newDefaultPoller(this))
+    ,wakeupFd_(createEventfd())
+    ,wakeupChannel_(new Channel(this,wakeupFd_))
+    ,currentActiveChannel_(nullptr)
+{
+    LOG_DEBUG("EventLoop created %p in thread %d \n",this,threadId_);
+    if(t_loopInThisThread){
+        LOG_FATAL("Another loop %p exists in this thread %d \n",t_loopInThisThread,threadId_);
+    }
+    else
+    {
+        t_loopInThisThread=this;
+    }
+
+    //设置wakeupfd的事件类型以及发生事件后的回调
+    wakeupChannel_->setReadCallback(std::bind(&EventLoop::handleRead,this));
+    //每一个eventloop都将监听wakeupchannel的EPOLLIN读事件
+    wakeupChannel_->enableReading();
+}
+```
+初始化成员变量：
+1. looping_, quit_, callingPendingFunctors_ (原子类型)：用于控制循环状态和回调执行状态
+2. threadId_: 记录当前 EventLoop 对象所在的线程ID，通过 CurrentThread::tid() 获取
+3. poller_: 通过 Poller::newDefaultPoller(this) 创建一个具体的 Poller 实例，eventloop中的事件监听就靠它来执行
+4. **🌟wakeupFd_以及回调设置🌟**:
+    **非常关键！！！！**
+
+    **在muduo库中base-loop获得新连接要分配给sub-loop时，靠的就是这个wakeupfd_来进行通信的**
+
+    **并且在muduo中，所有fd都统一封装为channel**
+
+    在每个eventloop构造发生时，
+
+    流程示例：
+
+    假设我们有一个主 `EventLoop` (`mainLoop`) 和一个 `EventLoop` 线程池，池中有多个 `Sub EventLoop`（比如 `subLoop1`, `subLoop2`, ...）。
+
+    
+
+    #### 1. 主 `EventLoop` (`mainLoop`) 接收新连接：
+
+    *   `mainLoop` 正在其 `loop()` 方法中运行，其 `Poller` 监听着 `listenfd`
+    *   一个客户端发起连接请求
+    *   `listenfd` 变为可读
+    *   `mainLoop` 的 `Poller::poll()` 返回，`Acceptor` 的 `Channel` 被激活
+    *   `mainLoop` 执行 `Acceptor` 的新连接回调函数
+    *   在 `Acceptor::handleRead()` 内部：
+        *   调用 `::accept()` 接受新连接，得到 `connfd` 和客户端地址
+        *   **选择一个 `Sub EventLoop`**：`Acceptor` (它所属 `TcpServer` 类) 会从 `EventLoop` 线程池中按照轮询选择一个 `Sub EventLoop`，比如选中了 `subLoop1`
+        *   **创建 `TcpConnection` 对象**：为这个 `connfd` 创建一个新的 `TcpConnection` 对象。这个 `TcpConnection` 对象会被关联到选中的 `subLoop1`
+        *   **关键的跨线程任务**：`mainLoop` (运行在主线程) 现在需要通知 `subLoop1` (运行在另一个IO线程) 来接管这个新的 `TcpConnection`，特别是要将 `connfd` 对应的 `Channel` 注册到 `subLoop1` 的 `Poller` 中。这个注册操作**必须**在 `subLoop1` 自己的线程中执行，以保证线程安全
+
+    #### 2. `mainLoop` 通知 `subLoop1`：
+
+    *   `mainLoop` 调用 `subLoop1->queueInLoop(callback)`。
+    *   这个 `callback` 会封装了进 `subLoop1` 线程的任务队列，为新 `TcpConnection` 设置 `Channel` 并将其注册到 `subLoop1` 的 `Poller` 中。
+    *   在 `subLoop1->queueInLoop(callback)` 内部：
+        *   `callback` 被添加到 `subLoop1` 的 `pendingFunctors_` 队列中（受互斥锁保护）。
+        *   🌟🌟因为 `mainLoop` 调用 `queueInLoop` 时，`subLoop1->isINLoopThread()` 会返回 `false` (因为当前线程是主线程，不是 `subLoop1` 的线程)，所以会执行 `subLoop1->wakeup()`🌟🌟。
+
+    #### 3. `subLoop1->wakeup()` 的执行：
+
+    *   `wakeup()` 函数向 `subLoop1` 的 `wakeupFd_` (我们称之为 `subLoop1_wakeupFd`) 写入一个字节当作事件发生。
+        ```cpp
+        uint64_t one = 1; 
+        ::write(subLoop1_wakeupFd, &one, sizeof one);
+        ```
+
+    #### 4. `subLoop1` 被唤醒：
+
+    *   `subLoop1` 可能正阻塞在 `Poller::poll()` 调用上，监听着它所管理的channel们是否有事件发生，其中就有subLoop1_wakeupFd(在构造时就已经封装为channel，注册到poller上)。
+    *   由于 `mainLoop` 向 `subLoop1_wakeupFd` 写入了数据，`subLoop1_wakeupFd` 变为可读。
+    *   `subLoop1` 的 `Poller::poll()` 检测到 `subLoop1_wakeupFd` 可读，于是返回。
+    *   `subLoop1` 的 `loop()` 方法会遍历 `activeChannels_`。其中一个就是 `subLoop1` 的 `wakeupChannel_` 
+    *   `wakeupChannel_->ReadCallback()` 被调用，进而执行 `EventLoop::handleRead()`。
+    *   `EventLoop::handleRead()` 会从 `subLoop1_wakeupFd` 中读取数据，清除读事件。
+
+    #### 5. `subLoop1` 执行待处理任务：
+
+    *   在 `subLoop1` 的 `loop()` 方法中，处理完I/O事件后，会调用 `dopendingFunctors()`。
+    *   `dopendingFunctors()` 会从 `pendingFunctors_` 队列中取出之前由 `mainLoop` 提交的那个 `callback`。
+    *   **`subLoop1` 在其自己的线程中执行 `callback`**。这个 `callback` (例如 `TcpConnection::connectEstablished`) 会：
+        *   为新的 `connfd` 创建或配置一个 `Channel`。
+        *   设置 `Channel` 的读写回调（指向 `TcpConnection` 的 `handleRead`, `handleWrite` 等方法）。
+        *   调用 `subLoop1->updateChannel(newChannel)` 将这个新的 `Channel` 注册到 `subLoop1` 的 `Poller` 中，开始监听 `connfd` 上的读写事件。
+
+
+    `wakeupFd_` 在此过程中的角色总结：
+
+    *   **作为信使**：当主 `EventLoop` (或其他任何线程) 需要让一个特定的 `Sub EventLoop` 执行某个任务时，它会将任务放入该 `Sub EventLoop` 的队列，并向该 `Sub EventLoop` 的 `wakeupFd_` 发送一个“信号”（通过写入数据）。
+    *   **打破阻塞**：这个信号使得 `Sub EventLoop` 的 `Poller::poll()` 调用从阻塞状态返回，即使当前并没有其他客户端I/O事件发生。
+    *   **保证任务在目标线程执行**：唤醒 `Sub EventLoop` 后，它就能在其 `loop()` 的后续步骤中检查并执行 `pendingFunctors_` 队列里的任务，从而确保了这些任务（如注册新连接的 `Channel`）是在 `Sub EventLoop` 自己的线程中执行的，避免了跨线程直接操作 `Poller` 等共享数据可能带来的竞态条件。
 
 
 
