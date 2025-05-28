@@ -606,7 +606,7 @@ void Logger::Log(std::string msg){
     将剩余的未读数据移动到头部，然后将可用空间拼接起来再利用，如图：
     ![扩容](res/扩容.png)
 
-- `🟢缓冲区读操作`
+`🟢缓冲区读操作`
 
 从一个给定的 fd 中读取数据，将其存入 Buffer 中
 
@@ -690,7 +690,8 @@ void Logger::Log(std::string msg){
 - 采用readv来读取数据，这样只会调用一次系统io操作，避免频繁的内核到用户的数据拷贝
 - 处理大数据块：通过结合内部缓冲区和栈上的 extrabuf，读取可能超过当前 Buffer 可写容量的数据
 
-- `🟢缓冲区写操作`
+
+`🟢缓冲区写操作`
 
 就是是将 Buffer 中当前可读的数据全部写入到指定的文件描述符 fd 中
 ```cpp
@@ -707,6 +708,147 @@ ssize_t Buffer::writeFd(int fd,int *saveErrno){
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 四、multi-Reactor事件循环模块
+这个模块主要由四个类构成：
+![eventloop](res/事件循环.png)
+
+### 4.1 Channel 类
+这个类用于封装一个文件描述符（如套接字、管道、定时器fd等）及其相关的事件和回调。它是事件分发的核心组件之一
+**channel 类的核心职责**
+1. 封装文件描述符：每个 Channel 对象都与一个唯一的文件描述符关联
+2. 注册感兴趣的事件：Channel 负责告诉事件循环它关心哪些类型的事件（update到eventloop,再由eventloop提交到poller中）
+3. 存储事件回调：当 Poller 检测到 fd 上发生了 Channel 感兴趣的事件时，告知eventloop，由eventloop来通知 Channel 调用预先设置好的回调函数来处理这些事件
+4. 生命周期管理：将channel和eventloop绑定（weak_ptr观察eventloop对象），防止在对象销毁后仍然执行其回调。
+`设置回调`
+```cpp
+void setReadCallback(ReadEventCallback cb){ readCallback_=std::move(cb); }
+void setWriteCallback(EventCallback cb){ writeCallback_=std::move(cb); }
+void setCloseCallback(EventCallback cb){ closeCallback_=std::move(cb); }
+void setErrorCallback(EventCallback cb){ errorCallback_=std::move(cb); }
+```
+用户设置的回调最终都是绑定到channel上，并交给eventloop去做监听，回调最初的设置是在tcpserver中，在第六章讲解
+
+`绑定`
+```cpp
+std::weak_ptr<void> tie_{};
+void Channel::tie(const std::shared_ptr<void>&obj){
+    tie_=obj;
+    tied_=true;
+}
+```
+这个 tie 机制是为了解决“悬挂回调”问题：如果 Channel 所属的对象（比如一个 TcpConnection）已经被销毁，但事件循环中仍有该 Channel 的事件待处理，直接调用回调可能会访问无效内存。tie 通过 std::weak_ptr 确保只有在宿主对象存活时才执行回调。
+
+`注册感兴趣的事件`
+
+```cpp
+
+void enableReading(){events_ |= KReadEvent;   update();}
+void disableReading(){events_ |= ~KReadEvent; update();}
+void enableWriting(){events_ |= KWriteEvent;  update();}
+void disableReading() { events_ &= ~KReadEvent; update(); }
+void disableWriting() { events_ &= ~KWriteEvent; update(); }
+
+void Channel::update(){
+  loop_->updateChannel(this);
+}
+```
+- 这些方法用于修改 Channel 感兴趣的事件集合 (events_)
+- 每次修改 events_ 后，都会调用 update() 方法,update调用所属eventloop的updateChannel方法，在其中调用poller_->updateChannel(channel);
+
+`最终的事件回调执行`
+
+```cpp
+void Channel::handleEvent(Timestamp receiveTime){
+    if(tied_){
+        auto ptr = tie_.lock();
+        if(ptr){
+            handleEventWithGuard(receiveTime);
+        }
+    }else{
+        handleEventWithGuard(receiveTime);
+    }
+}
+
+void Channel::handleEventWithGuard(Timestamp recieveTime){
+    //关闭写端会触发epollhup事件
+    if((revents_ & EPOLLHUP)&&!(revents_ & EPOLLIN)){
+        if(closeCallback_)closeCallback_();
+    }
+    if(revents_ & EPOLLERR){
+        if(errorCallback_)errorCallback_();
+    }
+    if(revents_&(EPOLLIN | EPOLLPRI)){
+        if(readCallback_)readCallback_(recieveTime);
+    }
+    if(revents_ & EPOLLOUT){
+        if(writeCallback_)writeCallback_();
+    }
+}
+```
+当 Poller 通知 EventLoop某个 fd 上有事件发生时，EventLoop 会调用对应 Channel 的这个方法,执行用户设置的回调。
+
+
+### 4.2 Poller
+Poller 类在 Reactor 模式中充当 I/O 多路复用的抽象基类。它的主要职责是监听一组文件描述符（通过 Channel 对象间接管理），并在这些文件描述符上发生事件时通知 EventLoop。具体的 I/O 多路复用机制（如 epoll, poll, select）由其派生类实现
+```cpp
+class Poller : noncopyable{
+public:
+    using ChannelList = std::vector<Channel*>;
+    Poller(EventLoop *loop);
+    virtual ~Poller();
+    virtual Timestamp poll(int timeoutMs, ChannelList *activeChannels) = 0;
+    virtual void updateChannel(Channel *channel) = 0;
+    virtual void removeChannel(Channel *channel) = 0;
+
+    bool hasChannel(Channel *channel)const;
+    static Poller* newDefaultPoller(EventLoop *loop);
+protected:
+    //key：shckfd，value：sockfd所属的Channel类型
+    using ChannelMap = std::unordered_map<int,Channel*>;
+    //存储所有正在被 Poller 监听的 Channel
+    ChannelMap listening_channels_;
+private:
+    EventLoop *ownerLoop_;
+};
+```
+着重讲一下这个类的设计和静态工厂方法
+
+1. 静态工厂方法
+
+    `static Poller* newDefaultPoller(EventLoop *loop);`
+
+    **工厂方法模式设计模式封装对象的创建过程，并允许在不修改客户端代码（这里是 EventLoop）的情况下改变被创建的对象类型。**
+
+-  在初始化时需要一个 Poller 对象来处理 I/O 多路复用。但是，具体使用哪种 Poller（例如             EpollPoller、PollPoller 或 SelectPoller）eventloop不知道，也不会把判断的逻辑放在eventloop中，EventLoop 只需要一行代码:
+   ```cpp
+   poller_ = Poller::newDefaultPoller(this); // 'this' 是 EventLoop 实例
+   ```
+   newDefaultPoller 方法将这个“决定使用哪种 Poller 并创建它”的逻辑封装起来。EventLoop 只需要调用这个静态方法，就能得到一个合适的 Poller 实例，而无需关心创建内部具体细节。
+- 并且在单独的文件中对newDefaultPoller做出具体的实现
+  - 如果需要添加新的 Poller 类型或者修改选择逻辑时，只需要修改 Poller.cpp 中 newDefaultPoller 的实现，而 Poller.h 的接口可以保持不变。
+  - 避免在基类的文件中由去包含子类的头文件，这不符合设计思想。
+
+
+2. 多态
+   - virtual ~Poller(); (虚析构函数)
+  
+        当通过基类指针 (Poller*) 指向一个派生类对象（比如 EpollPoller*），并在程序结束或不再需要该对象时 delete 这个基类指针，如果析构函数不是虚的，那么只会调用基类 Poller 的析构函数，而派生类 EpollPoller 的析构函数不会被调用。这会导致派生类中分配的资源（如 EpollPoller 可能创建的 epoll 文件描述符）无法被正确释放，从而造成资源泄漏。
+
+   - 纯虚函数
+        ```cpp
+            virtual Timestamp poll(int timeoutMs, ChannelList *activeChannels) = 0;
+            virtual void updateChannel(Channel *channel) = 0;
+            virtual void removeChannel(Channel *channel) = 0;
+        ```
+        EventLoop 可以持有一个 Poller* 指针，这个指针可以指向一个 EpollPoller 对象或一个 PollPoller 对象。当 EventLoop 调用 poller->poll(...) 时，由于 poll 是虚函数，实际执行的是指针所指向的具体派生类中的 poll 实现，实现运行时多态。
+
+
+### 4.3 EpollPoller
+
+
+### 4.4 Eventloop
+
+
+
 
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
