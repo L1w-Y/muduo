@@ -990,7 +990,7 @@ EventLoop 类的核心职责
 2. 执行回调任务：允许其他线程安全地将回调函数提交到 EventLoop 所在的线程中执行，以避免跨线程直接操作共享数据带来的竞态条件。
 3. 线程专属：一个 EventLoop 对象对应一个线程，确保所有与该循环相关的操作都在同一个线程中执行。
 
-先看类设计：
+**先看类设计：**
 ```cpp
 class EventLoop : noncopyable
 {
@@ -1039,7 +1039,7 @@ private:
     std::mutex mutex_;//线程安全
 };
 ```
-🟢 构造函数
+🟢 **构造函数**
 ```cpp
 EventLoop::EventLoop()
     : looping_(false)
@@ -1064,6 +1064,16 @@ EventLoop::EventLoop()
     wakeupChannel_->setReadCallback(std::bind(&EventLoop::handleRead,this));
     //每一个eventloop都将监听wakeupchannel的EPOLLIN读事件
     wakeupChannel_->enableReading();
+}
+
+//wakeup_fd的回调
+void EventLoop::handleRead()
+{
+    uint64_t one =1;
+    ssize_t n = read(wakeupFd_,&one,sizeof one);
+    if(n !=sizeof one){
+        LOG_ERROR("eventloop::handleRead() reads %zd bytes instead of 8",n);
+    }
 }
 ```
 初始化成员变量：
@@ -1138,6 +1148,168 @@ EventLoop::EventLoop()
     *   **作为信使**：当主 `EventLoop` (或其他任何线程) 需要让一个特定的 `Sub EventLoop` 执行某个任务时，它会将任务放入该 `Sub EventLoop` 的队列，并向该 `Sub EventLoop` 的 `wakeupFd_` 发送一个“信号”（通过写入数据）。
     *   **打破阻塞**：这个信号使得 `Sub EventLoop` 的 `Poller::poll()` 调用从阻塞状态返回，即使当前并没有其他客户端I/O事件发生。
     *   **保证任务在目标线程执行**：唤醒 `Sub EventLoop` 后，它就能在其 `loop()` 的后续步骤中检查并执行 `pendingFunctors_` 队列里的任务，从而确保了这些任务（如注册新连接的 `Channel`）是在 `Sub EventLoop` 自己的线程中执行的，避免了跨线程直接操作 `Poller` 等共享数据可能带来的竞态条件。
+
+🟢 **loop事件循环**
+
+这个方法它驱动着整个事件处理机制。一旦调用 loop()，当前线程就会进入一个持续的循环，直到被明确指示退出
+```cpp
+void EventLoop::loop(){
+    looping_ = true;
+    quit_=false;
+    LOG_INFO("eventloop %p start looping \n",this);
+
+    while(!quit_){
+        activeChannels_.clear();
+        //poller监听两类fd，一类是来自client，一类是用于loop间通信的eventfd(统一会封装为channel)
+        pollReturnTime_ = poller_->poll(KPollTimeMs,&activeChannels_);
+        for(auto ch : activeChannels_)
+        {
+            ch->handleEvent(pollReturnTime_);
+        }
+        //执行当前loop循环需要处理的回调操作
+        dopendingFunctors();
+    }
+    LOG_INFO("eventloop %p stop looping \n",this);
+    looping_=false;
+}
+```
+1. 初始化 (Initialization)：
+
+    - `looping_ = true`: 表明事件循环正在运行。这可以被其他部分查询，了解 EventLoop 的状态。
+    - `quit_ = false`: 设置退出标志为 false。这个标志控制着主 while 循环的持续。当其他地方（比如另一个线程，或者 EventLoop 自身的某个回调）想要停止这个事件循环时，会将 quit_ 设置为 true。
+ 2. 主循环 (while(!quit_)): 只要 quit_ 标志是 false，循环就会不断进行。每一轮循环代表一次对事件的检查和处理
+    - `清理活动事件` activeChannels_.clear()
+        
+        activeChannels_ 是一个容器，用来存放上一轮 Poller::poll() 调用返回的、发生了I/O事件的 Channel 对象。
+        在每一轮循环开始时，这个列表被清空，为当前轮次中新发生的事件做准备。
+    - `这是事件循环的核心阻塞点`
+        
+        poller_->poll() 会调用底层的I/O多路复用机制（epoll_wait）
+        
+        - 监听对象：Poller 监听两类文件描述符对应的 Channel 
+            
+            1. 客户端连接相关的 fd: subloop监听已建立的 TCP 连接的 socket fd，用于读写客户端数据。baseloop监听新用户的连接
+            1. EventLoop 内部通信的 fd: 最典型的就是 wakeupFd_ (一个 eventfd)，用于从其他线程唤醒当前 EventLoop，使其从 poll() 调用中返回，即使没有外部I/O事件。
+3. *处理事件，有两类事件回调函数*
+      - 第一种：**I/O事件**
+        ```cpp
+        for(auto ch : activeChannels_) { 
+            ch->handleEvent(pollReturnTime_); 
+        }
+        ```
+        **处理activeChannels_ 列表中的每一个 Channel 相应的回调函数**
+
+        Channel::handleEvent() 是一个分发器。它会检查 Channel 上实际发生的事件类型（例如，是可读事件 EPOLLIN 还是可写事件 EPOLLOUT，或者是错误事件 EPOLLERR），然后调用相应的、预先通过 setReadCallback(), setWriteCallback(), setErrorCallback() 等注册的回调函数
+
+   - 第二种：**eventloop本身的回调函数： dopendingFunctors()**
+   
+        **执行那些需要在 EventLoop 所在的特定线程中完成的任务**
+
+        回调事件提交者：
+        - `其他线程`：当其他线程需要与 EventLoop 线程安全地交互或修改 EventLoop 线程管理的资源时，会通过 EventLoop::queueInLoop(functor) 或 EventLoop::runInLoop(functor) 提交一个 Functor  
+        - `EventLoop 线程自身`：有时，在处理一个 I/O 事件回调时，可能不希望立即执行某个操作（比如销毁一个对象，因为可能还在调用栈上），而是将其包装成一个 Functor 并通过 queueInLoop 提交，以便在当前事件处理完成后再执行
+        
+        事件触发：
+        - 在 EventLoop::loop() 方法的每一次迭代中，在处理完所有当前发生的 I/O 事件 (activeChannels_ 的遍历) 之后，会固定调用 dopendingFunctors()
+  
+        - dopendingFunctors() 会从 pendingFunctors_ 队列中取出所有待执行的 Functor 并依次执行它们
+
+        比如：
+
+        - 主 EventLoop 通知 Sub EventLoop 注册新连接：主 EventLoop accept 新连接后，会创建一个 Functor (例如 std::bind(&TcpConnection::connectEstablished, newConn)) 并通过 subLoop->queueInLoop() 提交给选定的 Sub EventLoop。这个 Functor 会在 Sub EventLoop 的 dopendingFunctors() 中被执行，从而在 Sub EventLoop 线程中完成 Channel 的注册。
+
+    再提一下loop中调用的dopendingFunctors的设计
+
+    ```cpp
+        void EventLoop::dopendingFunctors(){
+        std::vector<Functor> Functors;
+        callingPendingFunctors_ = true;
+
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            Functors.swap(pendingFunctors_);
+        }
+
+        for(auto &f : Functors){
+            f();//执行当前loop回调
+        }
+        callingPendingFunctors_ = false;
+    }
+    ```
+    这里的`functorsToRun.swap(pendingFunctors_);`
+
+    通过 swap 直接交换两个容器的内部指针（vector 的底层数据指针），使得：
+    - Functors 快速获得 pendingFunctors_ 的原始数据。
+    - pendingFunctors_ 变为空（保持 Functors 的初始状态，此处是空）
+    - 操作复杂度是 O(1)，不涉及实际数据的拷贝
+
+    加锁只保护swap操作，这样速度非常快，因为没必要等着共享的pendingFunctors_去一个一个执行回调
+
+    交给栈上的复制品去做，不会阻塞住其他需要使用pendingFunctors_的线程
+
+
+
+🟢 **任务提交**
+
+这里涉及到的两个方法在上述解释中已经提到过，他们实现任务提交和跨线程调用的核心机制，在这儿不再赘述
+
+**void EventLoop::runInLoop(Functor cb)**：用于请求在 EventLoop 的线程中执行回调 cb 
+```cpp
+void EventLoop::runInLoop(Functor cb){
+    // 1. 检查当前线程是否就是 EventLoop 自己的线程
+    if(isINLoopThread()){
+        // 2. 如果是，则直接执行回调
+        cb();
+    }
+    else{
+        // 3. 如果不是，则将回调放入队列中，等待 EventLoop 线程执行
+        queueInLoop(std::move(cb)); // 使用 std::move 提高效率 (尤其当 Functor 捕获了较多状态时)
+    }
+}
+```
+**void EventLoop::queueInLoop(Functor cb)** :将任务添加到 EventLoop 待处理队列
+```cpp
+void EventLoop::queueInLoop(Functor cb){
+    // 1. 将回调添加到待处理任务队列 (线程安全)
+    {
+        std::unique_lock<std::mutex> lock(mutex_); // 获取互斥锁
+        pendingFunctors_.emplace_back(cb);         // 将回调添加到 vector 末尾
+    } // 锁在此处自动释放
+
+    // 2. 唤醒可能正在阻塞等待 I/O 事件的 EventLoop 线程
+    // "唤醒执行回调的loop线程"
+    if(!isINLoopThread() || callingPendingFunctors_){
+        wakeup();
+    }
+}
+
+//向wakeupfd_写一个数据
+void EventLoop::wakeup(){
+    uint64_t one =1;
+    ssize_t n = write(wakeupFd_,&one,sizeof one);
+    if(n!=sizeof one){
+        LOG_ERROR("eventloop::wakeup() writes %lu bytes instead of 8\n",n);
+    }
+}
+
+```
+
+🟢 **channe和poller的通信**
+
+不再赘述
+```cpp
+void EventLoop::updateChannel(Channel *channel){
+    poller_->updateChannel(channel);
+}
+void EventLoop::removeChannel(Channel *channel){
+    poller_->removeChannel(channel);
+}
+bool EventLoop::hasChannel(Channel *Channel){
+    return poller_->hasChannel(Channel);
+}
+```
+
+
 
 
 
