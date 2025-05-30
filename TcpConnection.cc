@@ -72,6 +72,7 @@ void TcpConnection:: shutdown(){
     handleclose中调用tcpserver给tcpconnection设置的ConnectionCallback_和closeCallback_
     tcpserver的回调在newConnection方法中执行，也就是连接建立时就设置完成
 */
+
 void TcpConnection::shutdownInLoop(){
     if(!channel_->isWriting()){
         socket_->shutdownWrite();

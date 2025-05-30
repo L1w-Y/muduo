@@ -1502,7 +1502,55 @@ EventLoopThreadPool 的目标是创建并管理一组（numThreads_ 个）后台
 
 ## 六、Tcp通信模块
 
+### 6.1 TcpConnection
+1. TcpConnection 封装了与单个客户端进行TCP通信的所有细节
+2. 生命周期管理：从连接建立到断开的整个过程。
+3. 数据收发：处理套接字上的读写事件，管理输入和输出缓冲区。
+4. 事件处理：通过 Channel 对象与 EventLoop 交互，响应套接字上的可读、可写、关闭、错误等事件。
+5. 回调机制：提供回调接口（如消息到达、连接建立/断开、数据发送完毕等），将网络事件通知给上层业务逻辑（通常是 TcpServer 或 TcpClient）。
+6. 状态管理：维护连接的当前状态（如连接中、已连接、断开中、已断开）。
+7. 线程安全：确保其操作在其所属的 EventLoop 线程中执行，以避免多线程问
+关键成员变量：
+- loop_ (EventLoop*): 指向管理此连接的 EventLoop 对象。所有与此连接相关的操作都必须在这个 loop_ 所在的线程中执行。 CheckLoopNotNull 确保传入的 loop 不为空。
+- name_ (const std::string): 连接的名称，通常用于日志和调试。
+- state_ (std::atomic<StateE>): 连接的当前状态（如 KConnecting, KConnected, KDisconnecting, KDisconnected）。使用 std::atomic 可能暗示了状态可能从其他线程查询，但修改应在 loop_ 线程中。
+- reading_ (bool): 标志是否正在主动读取数据。
+- socket_ (std::unique_ptr<Socket>): 封装了连接的套接字文件描述符 (sockfd) 及其相关操作（如 shutdownWrite）。
+- channel_ (std::unique_ptr<Channel>): 核心组件。Channel 是套接字文件描述符 (sockfd)  与 EventLoop 之间的桥梁。它负责：
+  - 向 EventLoop注册关心的事件（读、写等）。
+  - 当 EventLoop 检测到 sockfd 上有事件发生时，调用 Channel 中注册的回调函数。
+- localAddr_ (const InetAddress): 本地（服务器）的地址。
+- peerAddr_ (const InetAddress): 对等端（客户端）的地址。
+- inputbuffer_ (Buffer): 输入缓冲区，用于暂存从套接字读取到的数据。
+- outputbuffer_ (Buffer): 输出缓冲区，用于暂存待发送到套接字的数据。
+- ConnectionCallback_, MessageCallback_, WriteCompleteCallback_, highWaterMarkCallback_, closeCallback_: 各种回调函数，由上层（如 TcpServer）设置，用于处理连接的不同事件。
+- highWaterMark_ (size_t): 输出缓冲区的高水位标记。当待发送数据超过此标记时，会触发 highWaterMarkCallback_
+
+
+### 6.2 TcpServer
+TcpServer 的主要职责是监听指定的端口，接受新的客户端连接，并将这些连接分发给工作线程（如果配置了线程池）进行处理。它管理着服务器的生命周期和所有活动的 TcpConnection
+
+1. 监听与接受连接：通过内部的 Acceptor 对象来监听指定的IP地址和端口，当有新的客户端连接请求到达时，Acceptor 会接受连接并通知 TcpServer。
+2. 连接管理：维护一个所有活动 TcpConnection 对象的集合（通常是一个 std::map），并在连接建立和断开时进行相应的添加和移除操作。
+3. 线程池集成：可以配置一个 EventLoopThreadPool（线程池），将新接受的连接以某种策略（如轮询）分发给线程池中的某个 EventLoop（即某个工作线程）来处理，实现并发。
+4. 回调机制：提供回调接口（如新连接建立、消息到达、连接断开等），将服务器层面的事件通知给上层业务逻辑。
+5. 服务器生命周期：控制服务器的启动和停止。
+**关键成员变量：**
+- loop_ (EventLoop*): 指向服务器主 EventLoop 的指针。这个 EventLoop 通常负责处理监听套接字上的连接请求事件。CheckLoopNotNull 确保传入的 loop 不为空。
+- ipPort_ (const std::string): 服务器监听的IP地址和端口号的字符串表示。
+- name_ (const std::string): 服务器的名称，用于日志和调试。
+- acceptor_ (std::unique_ptr<Acceptor>): 核心组件。Acceptor 封装了服务器监听套接字（listenfd）的创建、绑定、监听以及接受新连接的逻辑。它本身也运行在 loop_（主 EventLoop）中。
+- threadPool_ (std::shared_ptr<EventLoopThreadPool>): 指向 EventLoopThreadPool 对象的指针。这个线程池管理着一组工作 EventLoop（即I/O线程），用于处理客户端连接上的数据收发。
+- newConnectionCallback_ (ConnectionCallback): 当有新连接成功建立时，TcpServer 会调用此回调。
+- MessageCallback_ (MessageCallback): 当某个 TcpConnection 收到数据时，会最终调用此回调。
+- WriteCompleteCallback_ (WriteCompleteCallback): 当某个 TcpConnection 的数据发送完毕时，会调用此回调。
+- threadInitCallback_ (ThreadInitCallback): 传递给 EventLoopThreadPool，用于在每个工作线程启动其 EventLoop 之前进行初始化。
+- connections_ (std::map<std::string, TcpConnectionPtr>): 一个映射表，用于存储所有活动的 TcpConnection。键是连接的名称 (connName)，值是 TcpConnection 的 std::shared_ptr (TcpConnectionPtr)。
+- nextConnId_ (int): 用于为新连接生成唯一ID的计数器。
+- started_ (std::atomic<int>): 标志服务器是否已经启动，用于防止多次调用 start()
+
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
+
 
 ## 七、模块间通信
 
@@ -1517,13 +1565,7 @@ EventLoopThreadPool 的目标是创建并管理一组（numThreads_ 个）后台
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 参考文章
-
+1. https://www.zhihu.com/question/59975081/answer/1932776593
+2. 《Linux高性能服务器编程》
+3. https://zhuanlan.zhihu.com/p/495016351
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
-
-## Thread EventLoopThread EventLoopThreadPool
-
-EventLoopThread的逻辑是
-构造时将thread_(std::bind(&EventLoopThread::threadFunc,this),name)绑定，作为thread类的func_回调在调用startLoop时，调用thread_.start()，创建子线程用智能指针管理，然后子线程内部又调用func_（），也就是EventLoopThread的threadFunc()方法，在这个方法内创建了一个loop,调用外部传给的EventLoopThread的callback_，然后在这个threadFunc()回调中执行loop.loop();
-两个问题
-1.设计成这样复杂的回调逻辑是为什么
-2.thread_(std::bind(&EventLoopThread::threadFunc,this),name)2.thread_(std::bind(&EventLoopThread::threadFunc,this),name)将类内部成员方法传给thread_，但是构造时是move,这样内成员方法不就是脱离对象实例在调用吗
