@@ -38,6 +38,7 @@ Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。�
   - [5.1 Thread类](#51-thread类)
   - [5.2 EventLoopThread](#52-eventloopthread类)
   - [5.3 EventLoopThreadPool线程池](#53-eventloopthreadpool线程池)
+  - [5.4 流程](#54-流程)
 - [六、Tcp通信模块](#六tcp通信模块)
 - [七、模块间通信](#七模块间通信)
 - [八、工作流程](#八工作流程)
@@ -1468,7 +1469,7 @@ void EventLoopThreadPool::start(const ThreadInitCallback &cb){
 }   
 ```
 
-### 流程
+### 5.4 流程
 
 EventLoopThreadPool 的目标是创建并管理一组（numThreads_ 个）后台 I/O 线程。每个后台线程都将拥有其专属的 EventLoop 对象，用于处理分配给该线程的 I/O 事件。start() 方法就是负责初始化并启动这些线程和它们的 EventLoop
 
@@ -1494,6 +1495,7 @@ EventLoopThreadPool 的目标是创建并管理一组（numThreads_ 个）后台
 7. 循环结束: 当 for 循环完成所有迭代后，线程池中所有的 numThreads_ 个工作线程都已经启动，并且每个线程都在运行自己的 EventLoop。线程池也拥有了所有这些 EventLoop 的指针
 8. 零线程情况: 如果 numThreads_ 为0，表示这是一个只使用主线程（或称为 baseLoop_ 所在线程）的“线程池”。如果此时用户提供了初始化回调 cb，那么这个 cb 会直接在 baseLoop_ 上执行
 
+![start](res/线程启动.png)
 
 
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
