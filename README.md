@@ -40,6 +40,8 @@ Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。�
   - [5.3 EventLoopThreadPool线程池](#53-eventloopthreadpool线程池)
   - [5.4 流程](#54-流程)
 - [六、Tcp通信模块](#六tcp通信模块)
+  - [6.1 Tcpconnection](#61-tcpconnection)
+  - [6.2 Tcpserver](#62-tcpserver)
 - [七、模块间通信](#七模块间通信)
 - [八、工作流程](#八工作流程)
 - [九、总结](#九总结)
@@ -1553,15 +1555,15 @@ TcpServer 的主要职责是监听指定的端口，接受新的客户端连接�
 
 
 ## 七、模块间通信
-
+待更新
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 八、工作流程
-
+待更新
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 九、总结
-
+待更新
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 参考文章
