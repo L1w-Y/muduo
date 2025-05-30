@@ -20,7 +20,6 @@ EventLoopThread::~EventLoopThread(){
     }
 }   
 
-
 EventLoop* EventLoopThread::startLoop(){
     thread_.start();//开起新线程
     EventLoop *loop = nullptr;

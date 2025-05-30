@@ -35,6 +35,9 @@ Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。�
   - [4.3 EpollPoller](#43-epollpoller)
   - [4.4 EventLoop](#44-eventloop)
 - [五、线程池模块](#五线程池模块)
+  - [5.1 Thread类](#51-thread类)
+  - [5.2 EventLoopThread](#52-eventloopthread类)
+  - [5.3 EventLoopThreadPool线程池](#53-eventloopthreadpool线程池)
 - [六、Tcp通信模块](#六tcp通信模块)
 - [七、模块间通信](#七模块间通信)
 - [八、工作流程](#八工作流程)
@@ -1316,6 +1319,182 @@ bool EventLoop::hasChannel(Channel *Channel){
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
 ## 五、线程池模块
+
+### 5.1 thread类
+对c++std::thread的一个封装
+```cpp
+class Thread : noncopyable
+{
+public:
+    using ThreadFunc = std::function<void()>;
+    explicit Thread(ThreadFunc,const std::string& name=std::string());
+    ~Thread();
+
+    void start();
+    void join();
+
+    bool started()const {return started_;}
+    pid_t tid()const {return tid_;}
+    const std::string& name(){return name_;}
+    static int numCreated(){return numCreated_;}
+private:
+    void setDefaultName();
+    bool started_;
+    bool joined_;
+    std::shared_ptr<std::thread> thread_;
+    pid_t tid_;
+    ThreadFunc func_;
+    std::string name_;
+    static std::atomic<int> numCreated_;
+};
+```
+核心是start方法，启动一个线程，我们先看这段代码：
+```cpp
+void Thread::start(){
+    started_ = true;
+    sem_t sem;
+    sem_init(&sem,false,0);// 信号量初始化为 0
+    thread_ = std::make_shared<std::thread>([&](){
+        tid_ = CurrentThread::tid();// 在新线程中获取线程 ID
+        sem_post(&sem);// 通知主线程继续
+        if(func_)func_();// 执行线程的主要任务
+    });
+    sem_wait(&sem);// 主线程等待新线程完成初始化
+}
+```
+核心是启动一个线程，在其中执行线程类初始化时注册好的回调，至于这个回调是什么和sem信号量的作用放在下面详细解释
+
+### 5.2 EventLoopThread类
+```cpp
+EventLoopThread::EventLoopThread(const ThreadInitCallback &cb,const std::string &name)
+:loop_(nullptr)
+,exiting_(false)
+,thread_(std::bind(&EventLoopThread::threadFunc,this),name)
+,mutex_()
+,cond_()
+,callback_(cb)
+{
+
+}   
+
+EventLoopThread::~EventLoopThread(){
+    exiting_=true;
+    if(loop_!=nullptr){
+        loop_->quit();
+        thread_.join();
+    }
+}   
+
+EventLoop* EventLoopThread::startLoop(){
+    thread_.start();//开起新线程
+    EventLoop *loop = nullptr;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        while(loop_==nullptr){
+            cond_.wait(lock);
+        }
+        loop = loop_;
+    }
+    return loop;
+}
+/*
+    这个方法传入了thread类，在thread类构造时绑定为回调函数
+    在startloop启动线程时，回调触发，创建一个loop
+    这也就是muduo库中one loop per thread思想
+*/
+void EventLoopThread::threadFunc(){
+    EventLoop loop;
+
+    if(callback_){
+        callback_(&loop);
+    }
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        loop_ = &loop;
+        cond_.notify_one();
+    }
+
+    loop.loop();
+    std::unique_lock<std::mutex> lock(mutex_);
+    loop_ = nullptr;
+}
+```
+🟢 **构造函数**
+
+在eventloop构造时最关键的就是将自身的threadFunc()方法传入thread，作为线程启动时的回调
+
+🟢 **线程启动回调**
+```cpp
+void EventLoopThread::threadFunc(){
+    EventLoop loop;
+
+    if(callback_){
+        callback_(&loop);
+    }
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        loop_ = &loop;
+        cond_.notify_one();
+    }
+    loop.loop();
+    std::unique_lock<std::mutex> lock(mutex_);
+    loop_ = nullptr;
+}
+```
+- if(callback_){ callback_(&loop); } 
+  
+  检查构造时是否传入了 callback_。如果传入了，就执行这个回调函数，并将当前线程中新创建的 EventLoop 对象 loop 的地址传递给它。这允许用户在事件循环正式开始前，对 EventLoop 进行一些自定义的初始化操作
+
+- loop_ = &loop 关键点！！！
+
+ 将当前线程栈上创建的 EventLoop 对象 loop 的地址赋给 EventLoopThread 的成员变量 loop_。这样，在 startLoop等待的() 方法中线程就能通过 loop_ 获取到这个 EventLoop 对象的指针了，这就是 one loop per thread 的具体实现
+        
+### 5.3 EventLoopThreadPool线程池
+
+```cpp
+void EventLoopThreadPool::start(const ThreadInitCallback &cb){
+    started_ =true;
+    for(int i = 0;i<numThreads_;++i){
+        char buf[name_.size()+32];
+        snprintf(buf,sizeof buf,"%s%d",name_.c_str(),i);
+        EventLoopThread *t=new EventLoopThread(cb,buf);
+        threads_.push_back(std::unique_ptr<EventLoopThread>(t));
+        loops_.push_back(t->startLoop());
+    }
+    //表明整个服务器只有一个线程，运行baseloop
+    if(numThreads_ == 0 && cb){
+        cb(baseLoop_);
+    }
+}   
+```
+
+### 流程
+
+EventLoopThreadPool 的目标是创建并管理一组（numThreads_ 个）后台 I/O 线程。每个后台线程都将拥有其专属的 EventLoop 对象，用于处理分配给该线程的 I/O 事件。start() 方法就是负责初始化并启动这些线程和它们的 EventLoop
+
+1. **线程池启动**：EventLoopThreadPool::start() 被调用。它首先把自己标记为 started_
+2. 循环创建subloop: 对于配置的 numThreads_（线程池中的线程数），它会执行以下操作：
+    - 创建 EventLoopThread 实例 (t):
+      - new EventLoopThread(cb, name): 一个 EventLoopThread 对象 t 被动态创建 
+      - 在 t 的构造函数内部，最重要的动作是初始化其成员 t->thread_（一个 Thread 对象）。这个 Thread 对象被告知，当它启动时，需要执行的函数是 t 这个 EventLoopThread 实例的 threadFunc() 方法。用户提供的初始化回调 cb 和线程名也被保存在 t 中。
+    -  存储与启动：
+       -  创建的 EventLoopThread 对象 t 被一个 std::unique_ptr接管，并存入线程池的 threads_ 列表中，用于生命周期管理。
+       -  调用 t->startLoop()。这是启动新线程并获取其 EventLoop 的关键步骤。
+3. EventLoopThread::startLoop() 的魔法
+   - t->startLoop() 首先调用其内部 Thread 对象 t->thread_ 的 start() 方法
+   - t->thread_.start() 负责创建一个新的线程（我们称之为“工作线程”）。这个新工作线程被配置为执行 t->threadFunc()。Thread::start() 使用信号量确保在它返回之前，新工作线程X至少已经启动并获取了自己的线程ID
+   - 在 t->thread_.start() 返回后，t->startLoop() （仍在创建线程池的那个“主线程”中执行）会等待一个条件变量。它在等待新工作线程X在 t->threadFunc() 内部完成 EventLoop 的创建。
+4. EventLoopThread::threadFunc() 在新工作线程中执行
+    - 创建 EventLoop: 在 t->threadFunc() 内部，一个 EventLoop 对象在工作线程X的栈上被创建。这就是“一个线程一个事件循环”的核心
+    - 执行初始化回调: 如果用户提供了 cb，那么这个 cb 会被立即执行，参数是新创建的 EventLoop 对象的地址。这允许用户在新 EventLoop 开始循环前对其进行配置。
+    - 通知主线程: t->threadFunc() 将新创建的 EventLoop 的地址保存到 t->loop_ 成员中，并通知（notify_one）在 t->startLoop() 中等待的条件变量。
+    - 进入事件循环: 最后，t->threadFunc() 调用 EventLoop::loop()。此时，工作线程X就进入了它自己的事件处理循环，开始监听和处理事件，并会阻塞在这里直到 EventLoop::quit() 被调用。
+5. startLoop() 返回: 主线程中，t->startLoop() 被唤醒，发现 t->loop_ 已经指向了工作线程X中新创建的 EventLoop。它获取这个指针并返回
+6. 存储 EventLoop 指针: EventLoopThreadPool::start() 将从 t->startLoop() 返回的 EventLoop* 指针存入其 loops_ 列表中
+7. 循环结束: 当 for 循环完成所有迭代后，线程池中所有的 numThreads_ 个工作线程都已经启动，并且每个线程都在运行自己的 EventLoop。线程池也拥有了所有这些 EventLoop 的指针
+8. 零线程情况: 如果 numThreads_ 为0，表示这是一个只使用主线程（或称为 baseLoop_ 所在线程）的“线程池”。如果此时用户提供了初始化回调 cb，那么这个 cb 会直接在 baseLoop_ 上执行
+
+
 
 <p align="right"><a href="#万字剖析muduo高性能网络库设计细节">回到顶部⬆️</a></p>
 
