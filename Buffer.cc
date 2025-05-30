@@ -3,13 +3,14 @@
 #include<sys/uio.h>
 #include<unistd.h>
 ssize_t Buffer::readFd(int fd, int* savedErrno) {
-    // 1. 在栈上创建一个临时缓冲区，大小为 65536 字节 (64KB)
+    // 1. 65536 字节 (64KB)
     char extrabuf[65536] = {}; 
 
     // 2. 定义一个 iovec 结构体数组，用于 readv 系统调用
     //    iovec 结构体用于描述一块内存区域 (基地址 + 长度)
     //    readv 可以一次性从文件描述符读取数据到多个不连续的内存区域
     struct iovec vec[2];
+
 
     // 3. 获取当前 Buffer 中可写字节数
     const size_t writable = writableBytes();

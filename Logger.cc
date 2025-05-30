@@ -8,6 +8,7 @@ Logger& Logger::instance(){
 void Logger::setLogLevel(int level){
         LogLevel_=level;
 }
+
 void Logger::Log(std::string msg){
     switch (LogLevel_)
     {
@@ -26,7 +27,7 @@ void Logger::Log(std::string msg){
     default:
         break;
     }
-    std::cout << msg; // 打印实际的消息
+    std::cout << msg; // 打印消息
     std::cout << ":" << Timestamp::now().toString() << std::endl;
     std::cout<<"print time"<<":"<<Timestamp::now().toString()<<std::endl;
 }
