@@ -1,6 +1,6 @@
 # 万字剖析muduo高性能网络库设计细节
 
-Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。网络库核心框架采用基于同步非阻塞IO的multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo对boost库的依赖。
+Muduo 是一个由陈硕大神开发的 Linux 服务器端高性能网络库。网络库核心框架采用multi-reactor模型，并且遵循one loop per thread的设计理念，本项目对muduo库核心部分进行重构，采用c++11的特性，移除muduo对boost库的依赖。
 
 我会先从整体的角度对muduo库设计进行阐述，再深入细节，对每个模块的架构，设计思想，各模块协助流程，编程细节进行深入解析。
 
